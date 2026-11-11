@@ -1,6 +1,7 @@
 package io.github.chenxiaoming233.hyperlink.ui;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -22,6 +23,7 @@ import io.github.chenxiaoming233.hyperlink.domain.NotificationRule;
 import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
 import io.github.chenxiaoming233.hyperlink.domain.TargetDevice;
 import io.github.chenxiaoming233.hyperlink.domain.editor.AppCatalogEntry;
+import io.github.chenxiaoming233.hyperlink.domain.editor.AppConditionEditorModel;
 import io.github.chenxiaoming233.hyperlink.domain.editor.AppSelectorModel;
 import io.github.chenxiaoming233.hyperlink.domain.editor.RuleAndGroup;
 import io.github.chenxiaoming233.hyperlink.domain.editor.RuleBranch;
@@ -56,11 +58,11 @@ final class RuleEditorPanel extends LinearLayout {
     private final FakeRuleStoreGateway gateway;
     private final SafeNotificationRuleWriter writer;
     private final TargetSelectionFlow targetSelectionFlow;
-    private final Set<String> selectedPackages = new LinkedHashSet<>();
     private final Set<RulePreset> selectedPresets = new LinkedHashSet<>();
     private final List<CheckBox> presetChecks = new ArrayList<>();
 
     private StructuredRuleDraft draft;
+    private AppConditionEditorModel appEditor;
     private String selectedTargetId;
     private String appQuery = "";
     private boolean showAllApps;
@@ -69,6 +71,7 @@ final class RuleEditorPanel extends LinearLayout {
     private EditText appSearch;
     private CheckBox showAllAppsCheck;
     private LinearLayout appItemsContainer;
+    private TextView appScopeView;
     private LinearLayout structureContainer;
     private LinearLayout existingRulesContainer;
     private TextView summaryView;
@@ -202,9 +205,15 @@ final class RuleEditorPanel extends LinearLayout {
                     refreshApps();
                 });
         addView(showAllAppsCheck);
+        appScopeView = text("", 13, Color.rgb(111, 119, 114));
+        appScopeView.setPadding(0, dp(8), 0, dp(4));
+        addView(appScopeView);
         appItemsContainer = new LinearLayout(activity);
         appItemsContainer.setOrientation(VERTICAL);
         addView(appItemsContainer, matchWrap());
+        Button applyAppSelection = actionButton("将选择结果写入当前 app 条件");
+        applyAppSelection.setOnClickListener(view -> applyScopedApps());
+        addView(applyAppSelection);
 
         summaryView = text("", 15, Color.rgb(45, 91, 62));
         summaryView.setPadding(0, dp(16), 0, dp(6));
@@ -269,13 +278,16 @@ final class RuleEditorPanel extends LinearLayout {
             StructuredRuleDraft expanded =
                     StructuredRuleDraft.fromPresets(
                             orderedPresets,
-                            new ArrayList<>(selectedPackages),
+                            appEditor == null
+                                    ? new ArrayList<>()
+                                    : new ArrayList<>(appEditor.selectedPackages()),
                             draft.createdAt());
             if (draft.hasRuleId()) {
                 expanded = expanded.withRuleId(draft.ruleId());
             }
             expanded = expanded.withStatus(draft.status());
             draft = expanded;
+            appEditor = AppConditionEditorModel.firstEditable(draft);
             refreshStructure();
             refreshApps();
             setStatus("预设已展开为可编辑的 OR 规则分支；预设类型不会写入规则。");
@@ -292,9 +304,12 @@ final class RuleEditorPanel extends LinearLayout {
                 AppSelectorModel.fromCatalog(
                                 catalogApps,
                                 new ArrayList<>(draft.referencedPackages()),
-                                new ArrayList<>(selectedPackages))
+                                appEditor == null
+                                        ? new ArrayList<>()
+                                        : new ArrayList<>(appEditor.selectedPackages()))
                         .withShowAllInstalled(showAllApps)
                         .withSearchQuery(appQuery);
+        appScopeView.setText(appScopeText());
         appItemsContainer.removeAllViews();
         updatingApps = true;
         try {
@@ -334,16 +349,17 @@ final class RuleEditorPanel extends LinearLayout {
                         + item.statusLabel());
         check.setTextSize(14);
         check.setChecked(item.selected());
+        check.setEnabled(appEditor != null);
         check.setOnCheckedChangeListener(
                 (button, checked) -> {
                     if (updatingApps) {
                         return;
                     }
-                    if (checked) {
-                        selectedPackages.add(item.packageName());
-                    } else {
-                        selectedPackages.remove(item.packageName());
+                    if (appEditor == null) {
+                        setStatus("请先在规则分支中选定一个 app 条件作用域。");
+                        return;
                     }
+                    appEditor = appEditor.togglePackage(item.packageName());
                     refreshApps();
                 });
         LinearLayout.LayoutParams checkParams =
@@ -505,8 +521,8 @@ final class RuleEditorPanel extends LinearLayout {
                                         "已增加验证码条件")));
         addConditions.addView(
                 smallButton(
-                        "写入选中应用",
-                        view -> applySelectedApps(groupIndex, branchIndex)));
+                        "选择本分支 app 集合",
+                        view -> selectAppScopeForBranch(groupIndex, branchIndex)));
         branchCard.addView(addConditions);
         return branchCard;
     }
@@ -545,6 +561,11 @@ final class RuleEditorPanel extends LinearLayout {
                                                 conditionIndex + 1),
                                         "条件已下移")));
         if (condition.field() == RuleCondition.Field.APP) {
+            actions.addView(
+                    smallButton(
+                            "选择此 app 条件",
+                            view -> selectAppScopeForCondition(
+                                    groupIndex, branchIndex, conditionIndex)));
             actions.addView(
                     smallButton(
                             condition.operator() == RuleCondition.Operator.IN
@@ -587,27 +608,43 @@ final class RuleEditorPanel extends LinearLayout {
         return row;
     }
 
-    private void applySelectedApps(int groupIndex, int branchIndex) {
-        if (selectedPackages.isEmpty()) {
-            setStatus("请先在应用选择器中选择至少一个 fake 应用。");
+    private void selectAppScopeForBranch(int groupIndex, int branchIndex) {
+        try {
+            appEditor = AppConditionEditorModel.atBranch(draft, groupIndex, branchIndex);
+            refreshApps();
+            setStatus("应用选择器已切换到当前分支的 app 条件作用域。");
+        } catch (IllegalArgumentException exception) {
+            setStatus("无法选择该分支的 app 条件作用域。");
+        }
+    }
+
+    private void selectAppScopeForCondition(
+            int groupIndex, int branchIndex, int conditionIndex) {
+        try {
+            appEditor =
+                    AppConditionEditorModel.atCondition(
+                            draft, groupIndex, branchIndex, conditionIndex);
+            refreshApps();
+            setStatus("应用选择器已载入当前 app 条件的包集合。");
+        } catch (IllegalArgumentException exception) {
+            setStatus("无法载入该 app 条件的包集合。");
+        }
+    }
+
+    private void applyScopedApps() {
+        if (appEditor == null) {
+            setStatus("请先在规则分支中选定一个 app 条件作用域。");
             return;
         }
-        RuleAndGroup group = draft.groups().get(groupIndex);
-        RuleBranch branch = group.branches().get(branchIndex);
-        int appConditionIndex = -1;
-        for (int index = 0; index < branch.conditions().size(); index++) {
-            if (branch.conditions().get(index).field() == RuleCondition.Field.APP) {
-                appConditionIndex = index;
-                break;
-            }
+        try {
+            appEditor = appEditor.apply(appEditor.operator());
+            draft = appEditor.draft();
+            refreshStructure();
+            refreshApps();
+            setStatus("选中应用仅写入当前 app 条件；其他分支保持不变。");
+        } catch (RuntimeException exception) {
+            setStatus("请至少选择一个 fake 应用后再写入当前 app 条件。");
         }
-        RuleCondition appCondition =
-                RuleCondition.appIn(new ArrayList<>(selectedPackages));
-        RuleBranch updated =
-                appConditionIndex < 0
-                        ? branch.addCondition(appCondition)
-                        : branch.replaceCondition(appConditionIndex, appCondition);
-        replaceBranch(groupIndex, branchIndex, updated, "应用集合条件已更新");
     }
 
     private void replaceCondition(
@@ -639,6 +676,7 @@ final class RuleEditorPanel extends LinearLayout {
     private void updateDraft(DraftChange change, String successMessage) {
         try {
             draft = change.apply();
+            appEditor = AppConditionEditorModel.firstEditable(draft);
             refreshStructure();
             refreshApps();
             setStatus(successMessage + "。自动摘要已按筛选结构更新。");
@@ -658,30 +696,49 @@ final class RuleEditorPanel extends LinearLayout {
             setStatus(selected.userMessage());
             return;
         }
+        RuleSaveGate gate = RuleSaveGate.from(selected.value().orElseThrow());
+        if (!gate.confirmationRequired()) {
+            completeSave(gate.decide(true));
+            return;
+        }
+        new AlertDialog.Builder(activity)
+                .setTitle(gate.promptTitle())
+                .setMessage(gate.promptMessage())
+                .setPositiveButton(
+                        "确认并保存",
+                        (dialog, which) -> completeSave(gate.decide(true)))
+                .setNegativeButton(
+                        "取消",
+                        (dialog, which) -> completeSave(gate.decide(false)))
+                .show();
+    }
+
+    private void completeSave(RuleSaveGate.SaveDecision decision) {
+        if (!decision.shouldSave()) {
+            setStatus(decision.message());
+            return;
+        }
         ConfirmedTargetSelection confirmed =
-                selected.value().orElseThrow().confirmAuthorization();
+                decision.confirmedSelection().orElseThrow();
         ServiceResult<RuleCreationResult> result =
                 writer.saveStructuredRule(confirmed, draft);
         if (!result.isSuccess()) {
             setStatus(result.userMessage());
             return;
         }
-        NotificationRule saved = result.value().orElseThrow().rule();
+        RuleCreationResult creationResult = result.value().orElseThrow();
+        NotificationRule saved = creationResult.rule();
         draft = StructuredRuleDsl.parse(saved);
-        selectedPackages.clear();
-        selectedPackages.addAll(draft.referencedPackages());
+        appEditor = AppConditionEditorModel.firstEditable(draft);
         refreshStructure();
         refreshApps();
         refreshExistingRules();
-        setStatus(
-                "已通过 SafeNotificationRuleWriter 写入独立 fake store："
-                        + saved.ruleId()
-                        + "。未连接真实 VoiceAssist，通知不会真实发送。");
+        setStatus(RuleSaveFeedback.from(saved, creationResult.notes()).displayText());
     }
 
     private void newRule() {
         draft = StructuredRuleDraft.empty(System.currentTimeMillis());
-        selectedPackages.clear();
+        appEditor = null;
         selectedPresets.clear();
         for (CheckBox check : presetChecks) {
             check.setChecked(false);
@@ -699,8 +756,7 @@ final class RuleEditorPanel extends LinearLayout {
             return;
         }
         selectTarget(rule.targetDeviceId());
-        selectedPackages.clear();
-        selectedPackages.addAll(draft.referencedPackages());
+        appEditor = AppConditionEditorModel.firstEditable(draft);
         selectedPresets.clear();
         for (CheckBox check : presetChecks) {
             check.setChecked(false);
@@ -768,6 +824,25 @@ final class RuleEditorPanel extends LinearLayout {
             default:
                 return condition.field().name();
         }
+    }
+
+    private String appScopeText() {
+        if (appEditor == null) {
+            return "当前未选择 app 条件作用域；请先在规则分支中点击“选择本分支 app 集合”。";
+        }
+        String scope =
+                "当前作用域：AND 组 "
+                        + (appEditor.groupIndex() + 1)
+                        + " / OR 分支 "
+                        + (appEditor.branchIndex() + 1);
+        if (appEditor.appConditionIndex() < 0) {
+            scope += " / 新建 app 条件";
+        } else {
+            scope += " / app 条件 " + (appEditor.appConditionIndex() + 1);
+        }
+        return scope
+                + "；已载入 "
+                + String.join(", ", appEditor.selectedPackages());
     }
 
     private void setStatus(String message) {

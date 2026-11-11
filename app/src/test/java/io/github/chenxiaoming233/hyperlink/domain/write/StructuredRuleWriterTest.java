@@ -8,6 +8,7 @@ import io.github.chenxiaoming233.hyperlink.domain.ConnectionState;
 import io.github.chenxiaoming233.hyperlink.domain.DeviceType;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationFlowSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationRule;
+import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
 import io.github.chenxiaoming233.hyperlink.domain.TargetDevice;
 import io.github.chenxiaoming233.hyperlink.domain.editor.RuleAndGroup;
 import io.github.chenxiaoming233.hyperlink.domain.editor.RuleBranch;
@@ -107,6 +108,58 @@ public final class StructuredRuleWriterTest {
                 matchingRuleCount(fixture.gateway.currentRules(), "demo-target-new"));
     }
 
+    @Test
+    public void duplicateSourceTargetSnapshotFailsClosedWithoutRewritingRules() {
+        NotificationFlowSnapshot demo =
+                FakeNotificationFlowService.demoSnapshot(ConnectionState.CONNECTED);
+        List<NotificationRule> rules = new ArrayList<>(demo.rules());
+        NotificationRule first = rules.get(0);
+        rules.add(
+                1,
+                new NotificationRule(
+                        "demo-rule-duplicate-target",
+                        first.sourceDeviceId(),
+                        first.sourceDeviceName(),
+                        first.targetDeviceId(),
+                        first.targetDeviceName(),
+                        first.status(),
+                        first.summary(),
+                        first.dslJson(),
+                        first.createdAt()));
+        NotificationFlowSnapshot duplicateFlow = withRules(demo, rules);
+        RuleStoreSnapshot snapshot =
+                new RuleStoreSnapshot(
+                        duplicateFlow,
+                        SOURCE,
+                        CapabilityEvidence.demoComplete(),
+                        false,
+                        false);
+        FakeRuleStoreGateway gateway = new FakeRuleStoreGateway(snapshot);
+        FakeLastKnownGoodStore lkgStore = new FakeLastKnownGoodStore();
+        SafeNotificationRuleWriter writer =
+                new SafeNotificationRuleWriter(gateway, lkgStore);
+        TargetSelectionFlow flow = new TargetSelectionFlow(duplicateFlow);
+        ConfirmedTargetSelection selection =
+                flow.select(SOURCE, "demo-target-a")
+                        .value()
+                        .orElseThrow()
+                        .confirmAuthorization();
+        StructuredRuleDraft draft =
+                StructuredRuleDraft.fromPresets(
+                        List.of(RulePreset.FOCUSED_NOTIFICATION), List.of(), 100L);
+
+        ServiceResult<RuleCreationResult> result =
+                writer.saveStructuredRule(selection, draft);
+
+        assertFalse(result.isSuccess());
+        assertTrue(result.userMessage().contains("重复"));
+        assertTrue(writer.isReadOnlyFault());
+        assertEquals(0, gateway.writeCount());
+        assertEquals(0, lkgStore.saveCount());
+        assertEquals(4, gateway.currentRules().size());
+        assertEquals(2, matchingRuleCount(gateway.currentRules(), "demo-target-a"));
+    }
+
     private static Fixture fixture(NotificationFlowSnapshot flow) {
         RuleStoreSnapshot snapshot =
                 new RuleStoreSnapshot(
@@ -138,6 +191,18 @@ public final class StructuredRuleWriterTest {
                 snapshot.compatibilityUnverified(),
                 targets,
                 snapshot.rules(),
+                snapshot.notificationAccess(),
+                snapshot.staleCache());
+    }
+
+    private static NotificationFlowSnapshot withRules(
+            NotificationFlowSnapshot snapshot, List<NotificationRule> rules) {
+        return new NotificationFlowSnapshot(
+                snapshot.connectionState(),
+                snapshot.stateVersion() + 1L,
+                snapshot.compatibilityUnverified(),
+                snapshot.targets(),
+                rules,
                 snapshot.notificationAccess(),
                 snapshot.staleCache());
     }
