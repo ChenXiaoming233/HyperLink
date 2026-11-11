@@ -115,7 +115,7 @@ public final class FakeNotificationFlowService implements NotificationFlowServic
                                   "andGroups": [
                                     {
                                       "branches": [
-                                        [{"field": "app", "op": "in", "value": "[\"demo.app.chat\",\"demo.app.social\"]"}],
+                                        [{"field": "app", "op": "in", "value": "[\\\"demo.app.chat\\\",\\\"demo.app.social\\\"]"}],
                                         [{"field": "isIsland", "op": "is", "value": "true"}],
                                         [{"field": "isVerifyCode", "op": "is", "value": "true"}]
                                       ]
