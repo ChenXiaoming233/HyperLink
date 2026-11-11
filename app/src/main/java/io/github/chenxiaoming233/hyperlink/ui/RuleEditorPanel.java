@@ -78,7 +78,7 @@ final class RuleEditorPanel extends LinearLayout {
     private TextView summaryView;
     private TextView statusView;
     private RuleUndoToken undoToken;
-    private boolean writesAvailable = true;
+    private final RuleEditorWriteGate writeGate = new RuleEditorWriteGate();
 
     RuleEditorPanel(
             Activity activity,
@@ -794,13 +794,9 @@ final class RuleEditorPanel extends LinearLayout {
 
     void refreshFromStore() {
         RuleEditorLoadState loadState = RuleEditorLoadState.from(gateway);
-        if (!loadState.writable()) {
-            writesAvailable = false;
-            setVisibility(GONE);
+        if (!applyLoadState(loadState)) {
             return;
         }
-        writesAvailable = true;
-        setVisibility(VISIBLE);
         NotificationFlowSnapshot snapshot = gateway.snapshot().flowSnapshot();
         source = sourceFrom(snapshot);
         targets = receivableTargets(snapshot);
@@ -837,6 +833,15 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void refreshExistingRules() {
+        RuleEditorLoadState loadState = RuleEditorLoadState.from(gateway);
+        if (!applyLoadState(loadState)) {
+            if (existingRulesContainer != null) {
+                existingRulesContainer.removeAllViews();
+                existingRulesContainer.addView(
+                        text(loadState.message(), 14, Color.rgb(156, 50, 35)));
+            }
+            return;
+        }
         if (existingRulesContainer == null) {
             return;
         }
@@ -1011,11 +1016,17 @@ final class RuleEditorPanel extends LinearLayout {
         storeChangedListener.run();
     }
 
+    private boolean applyLoadState(RuleEditorLoadState loadState) {
+        boolean available = writeGate.apply(loadState);
+        setVisibility(available ? VISIBLE : GONE);
+        return available;
+    }
+
     private boolean writesAvailable() {
-        if (!writesAvailable) {
+        if (!writeGate.writesAvailable()) {
             setStatus("共享 fake store 当前不可读或处于只读故障态，未执行写入。");
         }
-        return writesAvailable;
+        return writeGate.writesAvailable();
     }
 
     private NotificationRule findStoredRule(String ruleId) {
