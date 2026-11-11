@@ -729,9 +729,16 @@ final class RuleEditorPanel extends LinearLayout {
         }
         ConfirmedTargetSelection confirmed =
                 decision.confirmedSelection().orElseThrow();
+        int writesBefore = gateway.writeCount();
         ServiceResult<RuleCreationResult> result =
                 writer.saveStructuredRule(confirmed, draft);
         if (!result.isSuccess()) {
+            boolean writeAttempted = gateway.writeCount() > writesBefore;
+            RuleEditorLoadState loadState =
+                    writeGate.refreshAfterWriteFailure(gateway, writeAttempted);
+            applyRefreshState(loadState);
+            refreshExistingRules(loadState);
+            notifyStoreChanged();
             setStatus(result.userMessage());
             return;
         }
@@ -793,8 +800,8 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     void refreshFromStore() {
-        RuleEditorLoadState loadState = RuleEditorLoadState.from(gateway);
-        if (!applyLoadState(loadState)) {
+        RuleEditorLoadState loadState = refreshLoadState();
+        if (!loadState.writable()) {
             return;
         }
         NotificationFlowSnapshot snapshot = gateway.snapshot().flowSnapshot();
@@ -833,8 +840,11 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void refreshExistingRules() {
-        RuleEditorLoadState loadState = RuleEditorLoadState.from(gateway);
-        if (!applyLoadState(loadState)) {
+        refreshExistingRules(refreshLoadState());
+    }
+
+    private void refreshExistingRules(RuleEditorLoadState loadState) {
+        if (!loadState.writable()) {
             if (existingRulesContainer != null) {
                 existingRulesContainer.removeAllViews();
                 existingRulesContainer.addView(
@@ -1016,10 +1026,14 @@ final class RuleEditorPanel extends LinearLayout {
         storeChangedListener.run();
     }
 
-    private boolean applyLoadState(RuleEditorLoadState loadState) {
-        boolean available = writeGate.apply(loadState);
-        setVisibility(available ? VISIBLE : GONE);
-        return available;
+    private RuleEditorLoadState refreshLoadState() {
+        RuleEditorLoadState loadState = writeGate.refresh(gateway);
+        applyRefreshState(loadState);
+        return loadState;
+    }
+
+    private void applyRefreshState(RuleEditorLoadState loadState) {
+        setVisibility(loadState.writable() ? VISIBLE : GONE);
     }
 
     private boolean writesAvailable() {

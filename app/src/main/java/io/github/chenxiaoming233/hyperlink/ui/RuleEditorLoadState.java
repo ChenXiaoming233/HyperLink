@@ -30,6 +30,10 @@ final class RuleEditorLoadState {
         return writable;
     }
 
+    static RuleEditorLoadState writeFailure() {
+        return blocked("规则写入结果无法安全确认，生命周期编辑器已隐藏写入操作。");
+    }
+
     String message() {
         return message;
     }
