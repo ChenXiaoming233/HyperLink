@@ -33,6 +33,7 @@ import io.github.chenxiaoming233.hyperlink.domain.editor.StructuredRuleDraft;
 import io.github.chenxiaoming233.hyperlink.domain.write.CapabilityEvidence;
 import io.github.chenxiaoming233.hyperlink.domain.write.ConfirmedTargetSelection;
 import io.github.chenxiaoming233.hyperlink.domain.write.RuleCreationResult;
+import io.github.chenxiaoming233.hyperlink.domain.write.RuleModelReadiness;
 import io.github.chenxiaoming233.hyperlink.domain.write.RuleStoreSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.write.SafeNotificationRuleWriter;
 import io.github.chenxiaoming233.hyperlink.domain.write.SourceDevice;
@@ -47,6 +48,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Consumer;
 
 final class RuleEditorPanel extends LinearLayout {
     private final Activity activity;
@@ -60,9 +62,15 @@ final class RuleEditorPanel extends LinearLayout {
     private final TargetSelectionFlow targetSelectionFlow;
     private final Set<RulePreset> selectedPresets = new LinkedHashSet<>();
     private final List<CheckBox> presetChecks = new ArrayList<>();
+    private final EditableViewTracker<View> persistentEditableViews =
+            new EditableViewTracker<>();
+    private final RuleEditorRefreshCoordinator<View> refreshCoordinator =
+            new RuleEditorRefreshCoordinator<>();
+    private final RuleEditorInteractionPolicy interactionPolicy;
 
     private StructuredRuleDraft draft;
     private AppConditionEditorModel appEditor;
+    private RuleModelReadiness modelReadiness;
     private String selectedTargetId;
     private String appQuery = "";
     private boolean showAllApps;
@@ -75,6 +83,7 @@ final class RuleEditorPanel extends LinearLayout {
     private LinearLayout structureContainer;
     private LinearLayout existingRulesContainer;
     private TextView summaryView;
+    private TextView modelReadinessView;
     private TextView statusView;
 
     RuleEditorPanel(Activity activity) {
@@ -97,6 +106,8 @@ final class RuleEditorPanel extends LinearLayout {
         this.writer =
                 new SafeNotificationRuleWriter(gateway, new FakeLastKnownGoodStore());
         this.targetSelectionFlow = new TargetSelectionFlow(snapshot);
+        this.modelReadiness = RuleModelReadiness.inspect(gateway);
+        this.interactionPolicy = new RuleEditorInteractionPolicy(modelReadiness);
         this.draft = StructuredRuleDraft.empty(System.currentTimeMillis());
         this.selectedTargetId = targets.isEmpty() ? "" : targets.get(0).deviceId();
         setOrientation(VERTICAL);
@@ -127,6 +138,13 @@ final class RuleEditorPanel extends LinearLayout {
         notice.setPadding(0, 0, 0, dp(16));
         addView(notice);
 
+        modelReadinessView = text("", 14, Color.rgb(45, 91, 62));
+        modelReadinessView.setPadding(dp(10), dp(8), dp(10), dp(8));
+        addView(modelReadinessView, matchWrap());
+        Button redetectModel = rawActionButton("重新检测规则模型");
+        redetectModel.setOnClickListener(view -> redetectModel());
+        addView(redetectModel);
+
         addView(label("规则目标（fake）"));
         targetSelector = new Spinner(activity);
         List<String> targetLabels = new ArrayList<>();
@@ -151,6 +169,7 @@ final class RuleEditorPanel extends LinearLayout {
                     @Override
                     public void onNothingSelected(AdapterView<?> parent) {}
                 });
+        trackEditable(targetSelector);
         addView(targetSelector, matchWrap());
 
         TextView presetLabel = label("可编辑预设模板");
@@ -168,6 +187,7 @@ final class RuleEditorPanel extends LinearLayout {
                         }
                     });
             presetChecks.add(check);
+            trackEditable(check);
             addView(check);
         }
         Button expandPresets = actionButton("展开所选预设为 OR 分支");
@@ -196,6 +216,7 @@ final class RuleEditorPanel extends LinearLayout {
                         refreshApps();
                     }
                 });
+        trackEditable(appSearch);
         addView(appSearch, matchWrap());
         showAllAppsCheck = new CheckBox(activity);
         showAllAppsCheck.setText("显示全部已安装应用（默认仅可启动与规则已引用应用）");
@@ -204,6 +225,7 @@ final class RuleEditorPanel extends LinearLayout {
                     showAllApps = checked;
                     refreshApps();
                 });
+        trackEditable(showAllAppsCheck);
         addView(showAllAppsCheck);
         appScopeView = text("", 13, Color.rgb(111, 119, 114));
         appScopeView.setPadding(0, dp(8), 0, dp(4));
@@ -218,6 +240,11 @@ final class RuleEditorPanel extends LinearLayout {
         summaryView = text("", 15, Color.rgb(45, 91, 62));
         summaryView.setPadding(0, dp(16), 0, dp(6));
         addView(summaryView);
+
+        TextView advancedLabel =
+                label("高级区域：sender / text 的 regex / not_regex 条件");
+        advancedLabel.setPadding(0, dp(8), 0, dp(2));
+        addView(advancedLabel);
 
         TextView structureLabel = label("andGroups → 规则分支 → 条件");
         structureLabel.setPadding(0, dp(12), 0, dp(4));
@@ -261,9 +288,13 @@ final class RuleEditorPanel extends LinearLayout {
         refreshApps();
         refreshStructure();
         refreshExistingRules();
+        applyModelReadiness();
     }
 
     private void expandPresets() {
+        if (rejectWhenReadOnly()) {
+            return;
+        }
         if (selectedPresets.isEmpty()) {
             setStatus("请先选择至少一个预设。");
             return;
@@ -310,6 +341,7 @@ final class RuleEditorPanel extends LinearLayout {
                         .withShowAllInstalled(showAllApps)
                         .withSearchQuery(appQuery);
         appScopeView.setText(appScopeText());
+        refreshCoordinator.beginRebuild(RuleEditorRefreshCoordinator.Area.APP);
         appItemsContainer.removeAllViews();
         updatingApps = true;
         try {
@@ -349,19 +381,27 @@ final class RuleEditorPanel extends LinearLayout {
                         + item.statusLabel());
         check.setTextSize(14);
         check.setChecked(item.selected());
-        check.setEnabled(appEditor != null);
         check.setOnCheckedChangeListener(
                 (button, checked) -> {
                     if (updatingApps) {
                         return;
                     }
-                    if (appEditor == null) {
-                        setStatus("请先在规则分支中选定一个 app 条件作用域。");
+                    RuleEditorInteractionPolicy.AppSelection selection =
+                            interactionPolicy.selectApp(appEditor, item.packageName());
+                    if (!selection.accepted()) {
+                        updatingApps = true;
+                        try {
+                            button.setChecked(item.selected());
+                        } finally {
+                            updatingApps = false;
+                        }
+                        setStatus(selection.message());
                         return;
                     }
-                    appEditor = appEditor.togglePackage(item.packageName());
+                    appEditor = selection.editor();
                     refreshApps();
                 });
+        trackAppEditable(check);
         LinearLayout.LayoutParams checkParams =
                 new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
         checkParams.leftMargin = dp(8);
@@ -374,6 +414,7 @@ final class RuleEditorPanel extends LinearLayout {
             return;
         }
         summaryView.setText("自动摘要：" + draft.summary());
+        refreshCoordinator.beginRebuild(RuleEditorRefreshCoordinator.Area.STRUCTURE);
         structureContainer.removeAllViews();
         if (draft.groups().isEmpty()) {
             structureContainer.addView(
@@ -523,6 +564,34 @@ final class RuleEditorPanel extends LinearLayout {
                 smallButton(
                         "选择本分支 app 集合",
                         view -> selectAppScopeForBranch(groupIndex, branchIndex)));
+        addConditions.addView(
+                smallButton(
+                        "加 sender 正则",
+                        view ->
+                                showRegexConditionDialog(
+                                        RuleCondition.Field.SENDER,
+                                        RuleCondition.Operator.REGEX,
+                                        "",
+                                        condition ->
+                                                replaceBranch(
+                                                        groupIndex,
+                                                        branchIndex,
+                                                        branch.addCondition(condition),
+                                                        "已增加 sender 正则条件"))));
+        addConditions.addView(
+                smallButton(
+                        "加 text 正则",
+                        view ->
+                                showRegexConditionDialog(
+                                        RuleCondition.Field.TEXT,
+                                        RuleCondition.Operator.REGEX,
+                                        "",
+                                        condition ->
+                                                replaceBranch(
+                                                        groupIndex,
+                                                        branchIndex,
+                                                        branch.addCondition(condition),
+                                                        "已增加 text 正则条件"))));
         branchCard.addView(addConditions);
         return branchCard;
     }
@@ -582,6 +651,39 @@ final class RuleEditorPanel extends LinearLayout {
                                                             ? RuleCondition.Operator.NOT_IN
                                                             : RuleCondition.Operator.IN),
                                             "应用集合操作符已切换")));
+        } else if (condition.field() == RuleCondition.Field.SENDER
+                || condition.field() == RuleCondition.Field.TEXT) {
+            actions.addView(
+                    smallButton(
+                            "编辑正则",
+                            view ->
+                                    showRegexConditionDialog(
+                                            condition.field(),
+                                            condition.operator(),
+                                            condition.pattern(),
+                                            nextCondition ->
+                                                    replaceCondition(
+                                                            groupIndex,
+                                                            branchIndex,
+                                                            conditionIndex,
+                                                            nextCondition,
+                                                            "正则条件已更新"))));
+            actions.addView(
+                    smallButton(
+                            condition.operator() == RuleCondition.Operator.REGEX
+                                    ? "改为 not_regex"
+                                    : "改为 regex",
+                            view ->
+                                    replaceCondition(
+                                            groupIndex,
+                                            branchIndex,
+                                            conditionIndex,
+                                            condition.withOperator(
+                                                    condition.operator()
+                                                                    == RuleCondition.Operator.REGEX
+                                                            ? RuleCondition.Operator.NOT_REGEX
+                                                            : RuleCondition.Operator.REGEX),
+                                            "正则操作符已切换")));
         } else {
             actions.addView(
                     smallButton(
@@ -609,6 +711,9 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void selectAppScopeForBranch(int groupIndex, int branchIndex) {
+        if (rejectWhenReadOnly()) {
+            return;
+        }
         try {
             appEditor = AppConditionEditorModel.atBranch(draft, groupIndex, branchIndex);
             refreshApps();
@@ -620,6 +725,9 @@ final class RuleEditorPanel extends LinearLayout {
 
     private void selectAppScopeForCondition(
             int groupIndex, int branchIndex, int conditionIndex) {
+        if (rejectWhenReadOnly()) {
+            return;
+        }
         try {
             appEditor =
                     AppConditionEditorModel.atCondition(
@@ -632,6 +740,9 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void applyScopedApps() {
+        if (rejectWhenReadOnly()) {
+            return;
+        }
         if (appEditor == null) {
             setStatus("请先在规则分支中选定一个 app 条件作用域。");
             return;
@@ -662,6 +773,100 @@ final class RuleEditorPanel extends LinearLayout {
                 successMessage);
     }
 
+    private void showRegexConditionDialog(
+            RuleCondition.Field field,
+            RuleCondition.Operator operator,
+            String initialPattern,
+            Consumer<RuleCondition> onValidCondition) {
+        LinearLayout content = new LinearLayout(activity);
+        content.setOrientation(VERTICAL);
+        content.setPadding(dp(16), dp(4), dp(16), 0);
+
+        TextView help =
+                text(
+                        "使用 Java Pattern 语法。非法正则会即时提示，且“应用”按钮不可用。",
+                        13,
+                        Color.rgb(75, 82, 78));
+        help.setPadding(0, 0, 0, dp(8));
+        content.addView(help, matchWrap());
+
+        EditText input = new EditText(activity);
+        input.setSingleLine(true);
+        input.setText(initialPattern);
+        input.setHint(field == RuleCondition.Field.SENDER ? "sender 正则" : "text 正则");
+        content.addView(input, matchWrap());
+
+        TextView error = text("", 13, Color.rgb(165, 48, 32));
+        error.setPadding(0, dp(6), 0, 0);
+        content.addView(error, matchWrap());
+
+        AlertDialog dialog =
+                new AlertDialog.Builder(activity)
+                        .setTitle(
+                                (field == RuleCondition.Field.SENDER ? "sender" : "text")
+                                        + " / "
+                                        + (operator == RuleCondition.Operator.REGEX
+                                                ? "regex"
+                                                : "not_regex"))
+                        .setView(content)
+                        .setPositiveButton("应用", null)
+                        .setNegativeButton("取消", null)
+                        .create();
+        dialog.setOnShowListener(
+                ignored -> {
+                    Button applyButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+                    Runnable validate =
+                            () -> {
+                                String issue =
+                                        RuleCondition.regexIssue(
+                                                input.getText().toString());
+                                error.setText(issue);
+                                applyButton.setEnabled(
+                                        issue.isEmpty() && modelReadiness.writable());
+                            };
+                    input.addTextChangedListener(
+                            new TextWatcher() {
+                                @Override
+                                public void beforeTextChanged(
+                                        CharSequence text,
+                                        int start,
+                                        int count,
+                                        int after) {}
+
+                                @Override
+                                public void onTextChanged(
+                                        CharSequence text,
+                                        int start,
+                                        int before,
+                                        int count) {}
+
+                                @Override
+                                public void afterTextChanged(Editable editable) {
+                                    validate.run();
+                                }
+                            });
+                    applyButton.setOnClickListener(
+                            view -> {
+                                String pattern = input.getText().toString();
+                                String issue = RuleCondition.regexIssue(pattern);
+                                if (!issue.isEmpty()) {
+                                    error.setText(issue);
+                                    applyButton.setEnabled(false);
+                                    return;
+                                }
+                                if (rejectWhenReadOnly()) {
+                                    dialog.dismiss();
+                                    return;
+                                }
+                                onValidCondition.accept(
+                                        regexCondition(field, operator, pattern));
+                                dialog.dismiss();
+                            });
+                    validate.run();
+                });
+        dialog.show();
+    }
+
     private void replaceBranch(
             int groupIndex,
             int branchIndex,
@@ -674,6 +879,9 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void updateDraft(DraftChange change, String successMessage) {
+        if (rejectWhenReadOnly()) {
+            return;
+        }
         try {
             draft = change.apply();
             appEditor = AppConditionEditorModel.firstEditable(draft);
@@ -686,6 +894,9 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void save() {
+        if (rejectWhenReadOnly()) {
+            return;
+        }
         if (!draft.canSave()) {
             setStatus("当前没有可保存的筛选条件；未调用写入。");
             return;
@@ -714,6 +925,9 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void completeSave(RuleSaveGate.SaveDecision decision) {
+        if (rejectWhenReadOnly()) {
+            return;
+        }
         if (!decision.shouldSave()) {
             setStatus(decision.message());
             return;
@@ -722,7 +936,10 @@ final class RuleEditorPanel extends LinearLayout {
                 decision.confirmedSelection().orElseThrow();
         ServiceResult<RuleCreationResult> result =
                 writer.saveStructuredRule(confirmed, draft);
+        modelReadiness = RuleModelReadiness.inspect(gateway);
+        applyModelReadiness();
         if (!result.isSuccess()) {
+            refreshExistingRules();
             setStatus(result.userMessage());
             return;
         }
@@ -737,6 +954,9 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void newRule() {
+        if (rejectWhenReadOnly()) {
+            return;
+        }
         draft = StructuredRuleDraft.empty(System.currentTimeMillis());
         appEditor = null;
         selectedPresets.clear();
@@ -749,6 +969,9 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void loadRule(NotificationRule rule) {
+        if (rejectWhenReadOnly()) {
+            return;
+        }
         try {
             draft = StructuredRuleDsl.parse(rule);
         } catch (IllegalArgumentException exception) {
@@ -786,6 +1009,8 @@ final class RuleEditorPanel extends LinearLayout {
         if (existingRulesContainer == null) {
             return;
         }
+        refreshCoordinator.beginRebuild(
+                RuleEditorRefreshCoordinator.Area.EXISTING_RULES);
         existingRulesContainer.removeAllViews();
         for (NotificationRule rule : gateway.currentRules()) {
             existingRulesContainer.addView(createExistingRuleCard(rule));
@@ -803,7 +1028,8 @@ final class RuleEditorPanel extends LinearLayout {
                         13,
                         Color.rgb(111, 119, 114)));
         card.addView(text(rule.summary(), 14, Color.rgb(50, 58, 54)));
-        Button edit = actionButton("载入并编辑");
+        Button edit = rawActionButton("载入并编辑");
+        trackExistingRuleEditable(edit);
         edit.setOnClickListener(view -> loadRule(rule));
         card.addView(edit);
         return card;
@@ -821,6 +1047,20 @@ final class RuleEditorPanel extends LinearLayout {
                 return "isIsland = " + condition.booleanValue();
             case VERIFY_CODE:
                 return "isVerifyCode = " + condition.booleanValue();
+            case SENDER:
+                return "sender "
+                        + (condition.operator() == RuleCondition.Operator.REGEX
+                                ? "regex /"
+                                : "not_regex /")
+                        + condition.pattern()
+                        + "/";
+            case TEXT:
+                return "text "
+                        + (condition.operator() == RuleCondition.Operator.REGEX
+                                ? "regex /"
+                                : "not_regex /")
+                        + condition.pattern()
+                        + "/";
             default:
                 return condition.field().name();
         }
@@ -849,6 +1089,69 @@ final class RuleEditorPanel extends LinearLayout {
         statusView.setText(message + "\n" + fakeBoundaryNotice());
     }
 
+    private void redetectModel() {
+        modelReadiness = RuleModelReadiness.inspect(gateway);
+        applyModelReadiness();
+        refreshApps();
+        refreshStructure();
+        refreshExistingRules();
+        if (modelReadiness.writable()) {
+            setStatus("重新检测通过：整份 fake 规则模型可编辑。");
+        } else {
+            setStatus(
+                    "重新检测仍为只读："
+                            + modelReadiness.reason()
+                            + " 请先修复 fake 快照，再次点击“重新检测规则模型”。");
+        }
+    }
+
+    private void applyModelReadiness() {
+        if (modelReadiness == null) {
+            return;
+        }
+        interactionPolicy.update(modelReadiness);
+        if (modelReadinessView != null) {
+            if (modelReadiness.writable()) {
+                modelReadinessView.setText(
+                        "规则模型检查：通过。只能编辑已表达的合法 DSL；保存仍经过安全写入链路。");
+                modelReadinessView.setTextColor(Color.rgb(45, 91, 62));
+                modelReadinessView.setBackgroundColor(Color.rgb(226, 240, 226));
+            } else {
+                modelReadinessView.setText(
+                        "整份规则模型只读："
+                                + modelReadiness.reason()
+                                + "\n编辑与保存已禁用；修复 fake 快照后使用“重新检测规则模型”。");
+                modelReadinessView.setTextColor(Color.rgb(142, 42, 28));
+                modelReadinessView.setBackgroundColor(Color.rgb(251, 226, 216));
+            }
+        }
+        boolean writable = modelReadiness.writable();
+        persistentEditableViews.forEach(view -> view.setEnabled(writable));
+        refreshCoordinator.forEach(
+                RuleEditorRefreshCoordinator.Area.APP,
+                view ->
+                        view.setEnabled(
+                                interactionPolicy.appCheckboxEnabled(
+                                        appEditor != null)));
+        refreshCoordinator.forEach(
+                RuleEditorRefreshCoordinator.Area.STRUCTURE,
+                view -> view.setEnabled(interactionPolicy.canEdit()));
+        refreshCoordinator.forEach(
+                RuleEditorRefreshCoordinator.Area.EXISTING_RULES,
+                view -> view.setEnabled(interactionPolicy.canEdit()));
+    }
+
+    private boolean rejectWhenReadOnly() {
+        if (interactionPolicy.canEdit()) {
+            return false;
+        }
+        setStatus(
+                "整份规则模型为只读："
+                        + interactionPolicy.reason()
+                        + " 未执行编辑或保存；请修复 fake 快照后重新检测。");
+        return true;
+    }
+
     private LinearLayout actionRow() {
         LinearLayout row = new LinearLayout(activity);
         row.setOrientation(HORIZONTAL);
@@ -857,6 +1160,12 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private Button actionButton(String label) {
+        Button button = rawActionButton(label);
+        trackEditable(button);
+        return button;
+    }
+
+    private Button rawActionButton(String label) {
         Button button = new Button(activity);
         button.setText(label);
         button.setAllCaps(false);
@@ -864,12 +1173,55 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private Button smallButton(String label, OnClickListener listener) {
-        Button button = actionButton(label);
+        Button button = rawActionButton(label);
+        trackStructureEditable(button);
         button.setTextSize(12);
         button.setMinWidth(0);
         button.setMinimumWidth(0);
         button.setOnClickListener(listener);
         return button;
+    }
+
+    private <T extends View> T trackEditable(T view) {
+        persistentEditableViews.track(view);
+        view.setEnabled(modelReadiness != null && modelReadiness.writable());
+        return view;
+    }
+
+    private <T extends View> T trackAppEditable(T view) {
+        refreshCoordinator.track(RuleEditorRefreshCoordinator.Area.APP, view);
+        view.setEnabled(interactionPolicy.appCheckboxEnabled(appEditor != null));
+        return view;
+    }
+
+    private <T extends View> T trackStructureEditable(T view) {
+        refreshCoordinator.track(RuleEditorRefreshCoordinator.Area.STRUCTURE, view);
+        view.setEnabled(interactionPolicy.canEdit());
+        return view;
+    }
+
+    private <T extends View> T trackExistingRuleEditable(T view) {
+        refreshCoordinator.track(
+                RuleEditorRefreshCoordinator.Area.EXISTING_RULES, view);
+        view.setEnabled(interactionPolicy.canEdit());
+        return view;
+    }
+
+    private static RuleCondition regexCondition(
+            RuleCondition.Field field,
+            RuleCondition.Operator operator,
+            String pattern) {
+        if (field == RuleCondition.Field.SENDER) {
+            return operator == RuleCondition.Operator.REGEX
+                    ? RuleCondition.senderRegex(pattern)
+                    : RuleCondition.senderNotRegex(pattern);
+        }
+        if (field == RuleCondition.Field.TEXT) {
+            return operator == RuleCondition.Operator.REGEX
+                    ? RuleCondition.textRegex(pattern)
+                    : RuleCondition.textNotRegex(pattern);
+        }
+        throw new IllegalArgumentException("Only sender and text conditions use regex");
     }
 
     private TextView label(String value) {

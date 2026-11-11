@@ -1,5 +1,6 @@
 package io.github.chenxiaoming233.hyperlink.domain.write;
 
+import io.github.chenxiaoming233.hyperlink.domain.editor.RuleCondition;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashSet;
@@ -15,17 +16,25 @@ final class RuleDslValidator {
     private static final Set<String> CONDITION_FIELDS =
             setOf("field", "op", "value");
     private static final Set<String> KNOWN_FIELDS =
-            setOf("app", "isIsland", "isVerifyCode");
-    private static final Set<String> KNOWN_OPERATORS = setOf("in", "not_in", "is");
+            setOf("app", "isIsland", "isVerifyCode", "sender", "text");
+    private static final Set<String> KNOWN_OPERATORS =
+            setOf("in", "not_in", "is", "regex", "not_regex");
 
     private RuleDslValidator() {}
 
     static boolean isValid(String dslJson) {
+        return issue(dslJson).isEmpty();
+    }
+
+    static String issue(String dslJson) {
         try {
             Object parsed = new Parser(dslJson).parse();
-            return parsed instanceof Map && validRoot(castMap(parsed));
+            if (!(parsed instanceof Map)) {
+                return "DSL 根结构必须是对象。";
+            }
+            return rootIssue(castMap(parsed));
         } catch (IllegalArgumentException exception) {
-            return false;
+            return "DSL 不是可解析的合法 JSON 结构。";
         }
     }
 
@@ -33,69 +42,84 @@ final class RuleDslValidator {
         return new Parser(dslJson).parse();
     }
 
-    private static boolean validRoot(Map<String, Object> root) {
+    private static String rootIssue(Map<String, Object> root) {
         if (!ROOT_FIELDS.containsAll(root.keySet())) {
-            return false;
+            Set<String> unknown = new LinkedHashSet<>(root.keySet());
+            unknown.removeAll(ROOT_FIELDS);
+            return "DSL 根对象包含未知字段：" + String.join("、", unknown) + "。";
         }
         Object ruleText = root.get("ruleText");
         if (!(ruleText instanceof String) || ((String) ruleText).trim().isEmpty()) {
-            return false;
+            return "DSL 缺失非空 ruleText。";
         }
 
         boolean hasMode = root.containsKey("mode");
         boolean hasGroups = root.containsKey("andGroups");
         if (hasMode) {
             if (!"allEligibleNotifications".equals(root.get("mode")) || hasGroups) {
-                return false;
+                return "DSL mode 与筛选结构组合不可表达。";
             }
         }
-        return !hasGroups || validGroups(root.get("andGroups"));
+        // Existing rules may express "all eligible notifications" with ruleText only.
+        return hasGroups ? groupsIssue(root.get("andGroups")) : "";
     }
 
-    private static boolean validGroups(Object groupsValue) {
+    private static String groupsIssue(Object groupsValue) {
         if (!(groupsValue instanceof List) || ((List<?>) groupsValue).isEmpty()) {
-            return false;
+            return "DSL andGroups 必须是非空数组。";
         }
         for (Object groupValue : (List<?>) groupsValue) {
             if (!(groupValue instanceof Map)) {
-                return false;
+                return "DSL andGroups 的成员必须是对象。";
             }
             Map<String, Object> group = castMap(groupValue);
             if (!group.keySet().equals(GROUP_FIELDS)) {
-                return false;
+                Set<String> unknown = new LinkedHashSet<>(group.keySet());
+                unknown.removeAll(GROUP_FIELDS);
+                if (!unknown.isEmpty()) {
+                    return "AND 组包含未知字段：" + String.join("、", unknown) + "。";
+                }
+                return "AND 组缺少 branches。";
             }
             Object branchesValue = group.get("branches");
             if (!(branchesValue instanceof List) || ((List<?>) branchesValue).isEmpty()) {
-                return false;
+                return "AND 组的 branches 必须是非空数组。";
             }
             for (Object branchValue : (List<?>) branchesValue) {
-                if (!validBranch(branchValue)) {
-                    return false;
+                String branchIssue = branchIssue(branchValue);
+                if (!branchIssue.isEmpty()) {
+                    return branchIssue;
                 }
             }
         }
-        return true;
+        return "";
     }
 
-    private static boolean validBranch(Object branchValue) {
+    private static String branchIssue(Object branchValue) {
         if (!(branchValue instanceof List) || ((List<?>) branchValue).isEmpty()) {
-            return false;
+            return "规则分支必须是非空条件数组。";
         }
         for (Object conditionValue : (List<?>) branchValue) {
-            if (!validCondition(conditionValue)) {
-                return false;
+            String conditionIssue = conditionIssue(conditionValue);
+            if (!conditionIssue.isEmpty()) {
+                return conditionIssue;
             }
         }
-        return true;
+        return "";
     }
 
-    private static boolean validCondition(Object conditionValue) {
+    private static String conditionIssue(Object conditionValue) {
         if (!(conditionValue instanceof Map)) {
-            return false;
+            return "条件必须是对象。";
         }
         Map<String, Object> condition = castMap(conditionValue);
         if (!condition.keySet().equals(CONDITION_FIELDS)) {
-            return false;
+            Set<String> unknown = new LinkedHashSet<>(condition.keySet());
+            unknown.removeAll(CONDITION_FIELDS);
+            if (!unknown.isEmpty()) {
+                return "条件包含未知字段：" + String.join("、", unknown) + "。";
+            }
+            return "条件必须只包含 field、op、value。";
         }
         Object field = condition.get("field");
         Object operator = condition.get("op");
@@ -105,31 +129,47 @@ final class RuleDslValidator {
                 || !(value instanceof String)
                 || !KNOWN_FIELDS.contains(field)
                 || !KNOWN_OPERATORS.contains(operator)) {
-            return false;
+            return "条件包含未知字段或操作符。";
         }
         if ("app".equals(field)) {
-            return ("in".equals(operator) || "not_in".equals(operator))
-                    && validAppList((String) value);
+            if (!"in".equals(operator) && !"not_in".equals(operator)) {
+                return "app 条件只支持 in 或 not_in。";
+            }
+            return appListIssue((String) value);
         }
-        return "is".equals(operator)
-                && ("true".equals(value) || "false".equals(value));
+        if ("sender".equals(field) || "text".equals(field)) {
+            if (!"regex".equals(operator) && !"not_regex".equals(operator)) {
+                return field + " 条件只支持 regex 或 not_regex。";
+            }
+            String regexIssue = RuleCondition.regexIssue((String) value);
+            return regexIssue.isEmpty()
+                    ? ""
+                    : field + " 条件" + regexIssue;
+        }
+        if (!"is".equals(operator)) {
+            return field + " 条件只支持 is。";
+        }
+        if (!"true".equals(value) && !"false".equals(value)) {
+            return field + " 条件值必须是 true 或 false。";
+        }
+        return "";
     }
 
-    private static boolean validAppList(String value) {
+    private static String appListIssue(String value) {
         try {
             Object parsed = new Parser(value).parse();
             if (!(parsed instanceof List) || ((List<?>) parsed).isEmpty()) {
-                return false;
+                return "app 条件值必须是非空包名数组。";
             }
             for (Object item : (List<?>) parsed) {
                 if (!(item instanceof String)
                         || ((String) item).trim().isEmpty()) {
-                    return false;
+                    return "app 条件值只能包含非空包名。";
                 }
             }
-            return true;
+            return "";
         } catch (IllegalArgumentException exception) {
-            return false;
+            return "app 条件值不是合法包名数组。";
         }
     }
 

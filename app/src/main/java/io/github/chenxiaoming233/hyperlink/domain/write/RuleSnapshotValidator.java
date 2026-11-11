@@ -19,23 +19,32 @@ final class RuleSnapshotValidator {
     static String issue(RuleStoreSnapshot snapshot) {
         Objects.requireNonNull(snapshot, "snapshot");
         if (snapshot.unknownFieldsPresent()) {
-            return "规则快照包含未知字段，为避免部分写入，当前规则写入保持只读。";
+            return "规则快照包含未知字段，为避免部分写入，整份规则模型已进入只读。";
         }
         if (snapshot.unexpressibleDslPresent()) {
-            return "规则快照包含不可表达 DSL，为避免部分写入，当前规则写入保持只读。";
+            return "规则快照包含不可表达 DSL，为避免部分写入，整份规则模型已进入只读。";
         }
         Set<String> sourceTargetKeys = new HashSet<>();
         for (NotificationRule rule : snapshot.rules()) {
             if (!KNOWN_STATUSES.contains(rule.status())) {
-                return "规则快照包含未知状态，为避免部分写入，当前规则写入保持只读。";
+                return "规则 "
+                        + rule.ruleId()
+                        + " 使用未知状态“"
+                        + rule.status()
+                        + "”。为避免部分写入，整份规则模型已进入只读。";
             }
             String sourceTargetKey =
                     rule.sourceDeviceId() + "\u0000" + rule.targetDeviceId();
             if (!sourceTargetKeys.add(sourceTargetKey)) {
-                return "规则快照包含重复 source+target 规则，为避免静默删除，当前规则写入保持只读。";
+                return "规则快照包含重复 source+target 规则，为避免静默删除，整份规则模型已进入只读。";
             }
-            if (!RuleDslValidator.isValid(rule.dslJson())) {
-                return "规则快照包含未知字段或不可表达 DSL，为避免部分写入，当前规则写入保持只读。";
+            String dslIssue = RuleDslValidator.issue(rule.dslJson());
+            if (!dslIssue.isEmpty()) {
+                return "规则 "
+                        + rule.ruleId()
+                        + " 的 DSL 不可表达："
+                        + dslIssue
+                        + " 为避免部分写入，整份规则模型已进入只读。";
             }
         }
         return "";

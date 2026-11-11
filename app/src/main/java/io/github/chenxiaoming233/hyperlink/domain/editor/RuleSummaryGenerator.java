@@ -56,6 +56,20 @@ final class RuleSummaryGenerator {
                 return condition.booleanValue() ? "焦点通知" : "非焦点通知";
             case VERIFY_CODE:
                 return condition.booleanValue() ? "短信验证码" : "非短信验证码";
+            case SENDER:
+                return "发送者"
+                        + (condition.operator() == RuleCondition.Operator.REGEX
+                                ? "匹配正则 /"
+                                : "不匹配正则 /")
+                        + condition.pattern()
+                        + "/";
+            case TEXT:
+                return "文本"
+                        + (condition.operator() == RuleCondition.Operator.REGEX
+                                ? "匹配正则 /"
+                                : "不匹配正则 /")
+                        + condition.pattern()
+                        + "/";
             default:
                 throw new IllegalStateException("Unhandled condition field " + condition.field());
         }
