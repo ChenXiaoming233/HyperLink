@@ -9,6 +9,7 @@ import java.util.Optional;
 
 public final class RuleMutationResult {
     private final NotificationRule rule;
+    private final String affectedTargetDeviceId;
     private final RuleStoreSnapshot snapshot;
     private final RuleLkg lkg;
     private final boolean compatibilityUnverified;
@@ -16,11 +17,14 @@ public final class RuleMutationResult {
 
     RuleMutationResult(
             NotificationRule rule,
+            String affectedTargetDeviceId,
             RuleStoreSnapshot snapshot,
             RuleLkg lkg,
             boolean compatibilityUnverified,
             List<String> notes) {
         this.rule = rule;
+        this.affectedTargetDeviceId =
+                Objects.requireNonNull(affectedTargetDeviceId, "affectedTargetDeviceId");
         this.snapshot = Objects.requireNonNull(snapshot, "snapshot");
         this.lkg = Objects.requireNonNull(lkg, "lkg");
         this.compatibilityUnverified = compatibilityUnverified;
@@ -33,6 +37,10 @@ public final class RuleMutationResult {
 
     public boolean deleted() {
         return rule == null;
+    }
+
+    public String affectedTargetDeviceId() {
+        return affectedTargetDeviceId;
     }
 
     public RuleStoreSnapshot snapshot() {

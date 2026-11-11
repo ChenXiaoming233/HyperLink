@@ -53,6 +53,7 @@ public final class SafeNotificationRuleWriter {
 
     public ServiceResult<RuleMutationResult> changeRuleStatus(
             String ruleId,
+            String expectedTargetDeviceId,
             String expectedStatus,
             String nextStatus,
             boolean expectedTargetAuthorized) {
@@ -64,6 +65,7 @@ public final class SafeNotificationRuleWriter {
         synchronized (PROCESS_WRITE_LOCK) {
             return mutateRuleLocked(
                     ruleId,
+                    expectedTargetDeviceId,
                     expectedStatus,
                     nextStatus,
                     expectedTargetAuthorized,
@@ -72,10 +74,17 @@ public final class SafeNotificationRuleWriter {
     }
 
     public ServiceResult<RuleMutationResult> deleteRule(
-            String ruleId, boolean expectedTargetAuthorized) {
+            String ruleId,
+            String expectedTargetDeviceId,
+            boolean expectedTargetAuthorized) {
         synchronized (PROCESS_WRITE_LOCK) {
             return mutateRuleLocked(
-                    ruleId, "", "", expectedTargetAuthorized, true);
+                    ruleId,
+                    expectedTargetDeviceId,
+                    "",
+                    "",
+                    expectedTargetAuthorized,
+                    true);
         }
     }
 
@@ -261,12 +270,17 @@ public final class SafeNotificationRuleWriter {
 
     private ServiceResult<RuleMutationResult> mutateRuleLocked(
             String ruleId,
+            String expectedTargetDeviceId,
             String expectedStatus,
             String nextStatus,
             boolean expectedTargetAuthorized,
             boolean delete) {
         if (ruleId == null || ruleId.trim().isEmpty()) {
             return ServiceResult.failure("未指定要修改的规则，未执行任何写入。");
+        }
+        if (expectedTargetDeviceId == null
+                || expectedTargetDeviceId.trim().isEmpty()) {
+            return ServiceResult.failure("未指定预期目标，未执行任何写入。");
         }
         String persistentFault = readOnlyFaultMessageLocked();
         if (!persistentFault.isEmpty()) {
@@ -307,6 +321,10 @@ public final class SafeNotificationRuleWriter {
             return ServiceResult.failure("规则不存在或已被外部修改，请重新读取。");
         }
         NotificationRule currentRule = current.rules().get(ruleIndex);
+        if (!expectedTargetDeviceId.equals(currentRule.targetDeviceId())) {
+            return ServiceResult.failure(
+                    "规则目标已在外部变化，未执行任何写入；不会删除或撤销错误目标。");
+        }
         TargetDevice target = findTarget(flow, currentRule.targetDeviceId());
         if (target == null) {
             return ServiceResult.failure("规则目标不在当前快照中，未执行任何写入。");
@@ -411,6 +429,7 @@ public final class SafeNotificationRuleWriter {
         return ServiceResult.success(
                 new RuleMutationResult(
                         changedRule,
+                        currentRule.targetDeviceId(),
                         verified,
                         lkg,
                         compatibilityUnverified,

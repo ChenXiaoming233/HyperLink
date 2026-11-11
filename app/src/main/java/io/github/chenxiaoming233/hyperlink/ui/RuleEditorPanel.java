@@ -18,7 +18,6 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
-import io.github.chenxiaoming233.hyperlink.domain.ConnectionState;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationFlowSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationRule;
 import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
@@ -46,12 +45,12 @@ import io.github.chenxiaoming233.hyperlink.domain.write.TargetSelection;
 import io.github.chenxiaoming233.hyperlink.domain.write.TargetSelectionFlow;
 import io.github.chenxiaoming233.hyperlink.fake.FakeAppCatalog;
 import io.github.chenxiaoming233.hyperlink.fake.FakeLastKnownGoodStore;
-import io.github.chenxiaoming233.hyperlink.fake.FakeNotificationFlowService;
 import io.github.chenxiaoming233.hyperlink.fake.FakeRuleStoreGateway;
 import io.github.chenxiaoming233.hyperlink.fake.FakeTargetPermissionGateway;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 final class RuleEditorPanel extends LinearLayout {
@@ -85,11 +84,10 @@ final class RuleEditorPanel extends LinearLayout {
     private TextView statusView;
     private RuleUndoToken undoToken;
 
-    RuleEditorPanel(Activity activity) {
+    RuleEditorPanel(Activity activity, NotificationFlowSnapshot snapshot) {
         super(activity);
         this.activity = activity;
-        this.snapshot =
-                FakeNotificationFlowService.demoSnapshot(ConnectionState.CONNECTED);
+        this.snapshot = Objects.requireNonNull(snapshot, "snapshot");
         this.source = sourceFrom(snapshot);
         this.targets = receivableTargets(snapshot);
         this.appCatalog = FakeAppCatalog.demo();

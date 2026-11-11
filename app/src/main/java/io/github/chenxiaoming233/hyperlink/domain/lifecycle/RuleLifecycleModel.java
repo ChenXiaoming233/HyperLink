@@ -160,7 +160,7 @@ public final class RuleLifecycleModel {
                     targetAuthorized,
                     blocked,
                     blockedMessage,
-                    actionsAvailable && active,
+                    actionsAvailable && active && !blocked,
                     actionsAvailable && paused && target != null && targetAuthorized,
                     actionsAvailable && target != null);
         }

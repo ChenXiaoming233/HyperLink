@@ -45,6 +45,7 @@ public final class SettingsActivity extends Activity {
     private Spinner scenarioSelector;
     private LinearLayout targetContainer;
     private LinearLayout ruleContainer;
+    private LinearLayout editorContainer;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -177,10 +178,11 @@ public final class SettingsActivity extends Activity {
                 view -> openNotificationAccessSettings());
         page.addView(notificationAccessSettingsButton);
 
-        RuleEditorPanel ruleEditorPanel = new RuleEditorPanel(this);
+        editorContainer = new LinearLayout(this);
+        editorContainer.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams editorParams = matchWrap();
         editorParams.topMargin = dp(28);
-        page.addView(ruleEditorPanel, editorParams);
+        page.addView(editorContainer, editorParams);
 
         TextView targetHeading = sectionHeading("目标设备");
         targetHeading.setPadding(0, dp(28), 0, dp(4));
@@ -287,6 +289,13 @@ public final class SettingsActivity extends Activity {
                         ? "状态版本：未知 · 只读"
                         : "状态版本：" + snapshot.stateVersion() + " · 只读");
         retryButton.setEnabled(model.retryEnabled());
+        editorContainer.removeAllViews();
+        if (snapshot == null) {
+            editorContainer.addView(
+                    emptySectionText("读取失败：生命周期编辑器不可用，未使用独立快照降级。"));
+        } else {
+            editorContainer.addView(new RuleEditorPanel(this, snapshot), matchWrap());
+        }
 
         targetContainer.removeAllViews();
         for (PanelDisplayModel.TargetItem target : model.targets()) {

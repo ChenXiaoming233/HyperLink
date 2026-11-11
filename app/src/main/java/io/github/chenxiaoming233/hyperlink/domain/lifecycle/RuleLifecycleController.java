@@ -1,6 +1,7 @@
 package io.github.chenxiaoming233.hyperlink.domain.lifecycle;
 
 import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
+import io.github.chenxiaoming233.hyperlink.domain.TargetDevice;
 import io.github.chenxiaoming233.hyperlink.domain.write.RuleMutationResult;
 import io.github.chenxiaoming233.hyperlink.domain.write.RuleStoreGateway;
 import io.github.chenxiaoming233.hyperlink.domain.write.RuleStoreSnapshot;
@@ -19,6 +20,8 @@ public final class RuleLifecycleController {
     private RuleUndoToken lastUndoToken;
     private DeleteConfirmation pendingDelete;
     private String transientBlockedError = "";
+    private String transientConflictTargetDeviceId = "";
+    private boolean transientConflictExpectedAuthorization;
     private RuleLifecycleModel model;
 
     public RuleLifecycleController(
@@ -38,7 +41,11 @@ public final class RuleLifecycleController {
         this.undoWindowMillis = undoWindowMillis;
     }
 
-    public ServiceResult<RuleLifecycleModel> refresh() {
+    public synchronized ServiceResult<RuleLifecycleModel> refresh() {
+        return refreshLocked(true);
+    }
+
+    private ServiceResult<RuleLifecycleModel> refreshLocked(boolean clearTransientError) {
         ServiceResult<RuleStoreSnapshot> readResult;
         try {
             readResult = ruleStore.read();
@@ -48,17 +55,22 @@ public final class RuleLifecycleController {
         if (!readResult.isSuccess()) {
             return ServiceResult.failure("无法读取规则生命周期状态，请稍后重试。");
         }
+        RuleStoreSnapshot snapshot = readResult.value().orElseThrow();
+        if (clearTransientError && conflictResolved(snapshot)) {
+            transientBlockedError = "";
+            transientConflictTargetDeviceId = "";
+        }
         model =
                 RuleLifecycleModel.from(
-                        readResult.value().orElseThrow(),
+                        snapshot,
                         lastUndoToken,
                         transientBlockedError);
         return ServiceResult.success(model);
     }
 
-    public RuleLifecycleModel model() {
+    public synchronized RuleLifecycleModel model() {
         if (model == null) {
-            ServiceResult<RuleLifecycleModel> result = refresh();
+            ServiceResult<RuleLifecycleModel> result = refreshLocked(true);
             if (!result.isSuccess()) {
                 throw new IllegalStateException(result.userMessage());
             }
@@ -66,15 +78,15 @@ public final class RuleLifecycleController {
         return model;
     }
 
-    public ServiceResult<RuleLifecycleModel> pause(String ruleId) {
+    public synchronized ServiceResult<RuleLifecycleModel> pause(String ruleId) {
         return changeStatus(ruleId, "active", "paused");
     }
 
-    public ServiceResult<RuleLifecycleModel> resume(String ruleId) {
+    public synchronized ServiceResult<RuleLifecycleModel> resume(String ruleId) {
         return changeStatus(ruleId, "paused", "active");
     }
 
-    public ServiceResult<RuleLifecycleModel> undo(RuleUndoToken token) {
+    public synchronized ServiceResult<RuleLifecycleModel> undo(RuleUndoToken token) {
         if (token == null
                 || lastUndoToken == null
                 || token.sequence() != lastUndoToken.sequence()
@@ -83,27 +95,31 @@ public final class RuleLifecycleController {
         }
         if (monotonicClock.getAsLong() > token.expiresAtMillis()) {
             lastUndoToken = null;
-            refresh();
+            refreshLocked(true);
             return ServiceResult.failure("撤销时间窗口已过期，未执行任何写入。");
         }
         lastUndoToken = null;
         ServiceResult<RuleMutationResult> result =
                 writer.changeRuleStatus(
                         token.ruleId(),
+                        token.targetDeviceId(),
                         token.nextStatus(),
                         token.previousStatus(),
                         token.targetAuthorized());
         if (!result.isSuccess()) {
-            return blocked(result.userMessage());
+            return blocked(
+                    result.userMessage(),
+                    token.targetDeviceId(),
+                    token.targetAuthorized());
         }
-        transientBlockedError = "";
+        clearTransientConflict();
         model =
                 RuleLifecycleModel.from(
                         result.value().orElseThrow().snapshot(), null, "");
         return ServiceResult.success(model);
     }
 
-    public ServiceResult<DeleteConfirmation> requestDelete(String ruleId) {
+    public synchronized ServiceResult<DeleteConfirmation> requestDelete(String ruleId) {
         if (ruleId == null || ruleId.trim().isEmpty()) {
             return ServiceResult.failure("未指定要删除的规则。");
         }
@@ -140,7 +156,7 @@ public final class RuleLifecycleController {
         return ServiceResult.success(confirmation);
     }
 
-    public ServiceResult<RuleLifecycleModel> confirmDelete(
+    public synchronized ServiceResult<RuleLifecycleModel> confirmDelete(
             DeleteConfirmation confirmation, boolean confirmed) {
         if (confirmation == null
                 || pendingDelete == null
@@ -150,14 +166,36 @@ public final class RuleLifecycleController {
         }
         pendingDelete = null;
         if (!confirmed) {
-            return refresh();
+            return refreshLocked(true);
         }
 
         ServiceResult<RuleMutationResult> deleted =
                 writer.deleteRule(
-                        confirmation.ruleId(), confirmation.expectedTargetAuthorized());
+                        confirmation.ruleId(),
+                        confirmation.targetDeviceId(),
+                        confirmation.expectedTargetAuthorized());
         if (!deleted.isSuccess()) {
-            return blocked(deleted.userMessage());
+            return blocked(
+                    deleted.userMessage(),
+                    confirmation.targetDeviceId(),
+                    confirmation.expectedTargetAuthorized());
+        }
+        RuleMutationResult mutation = deleted.value().orElseThrow();
+        if (!confirmation
+                .targetDeviceId()
+                .equals(mutation.affectedTargetDeviceId())) {
+            String message =
+                    "删除校验发现目标绑定不一致，未撤销任何目标授权；"
+                            + "当前进入阻断故障状态。";
+            try {
+                writer.enterReadOnlyFault(message);
+            } catch (RuntimeException exception) {
+                message += " 无法持久化故障态，请停止后续写入。";
+            }
+            return blocked(
+                    message,
+                    confirmation.targetDeviceId(),
+                    confirmation.expectedTargetAuthorized());
         }
 
         ServiceResult<TargetPermissionReceipt> revoked;
@@ -183,12 +221,15 @@ public final class RuleLifecycleController {
                 message += " 无法持久化故障态，请停止后续写入。";
             }
             lastUndoToken = null;
-            return blocked(message);
+            return blocked(
+                    message,
+                    confirmation.targetDeviceId(),
+                    confirmation.expectedTargetAuthorized());
         }
 
         lastUndoToken = null;
-        transientBlockedError = "";
-        return refresh();
+        clearTransientConflict();
+        return refreshLocked(true);
     }
 
     private ServiceResult<RuleLifecycleModel> changeStatus(
@@ -205,11 +246,15 @@ public final class RuleLifecycleController {
         ServiceResult<RuleMutationResult> result =
                 writer.changeRuleStatus(
                         ruleId,
+                        rule.targetDeviceId(),
                         expectedStatus,
                         nextStatus,
                         rule.targetAuthorized());
         if (!result.isSuccess()) {
-            return blocked(result.userMessage());
+            return blocked(
+                    result.userMessage(),
+                    rule.targetDeviceId(),
+                    rule.targetAuthorized());
         }
         RuleUndoToken undoToken =
                 new RuleUndoToken(
@@ -221,20 +266,45 @@ public final class RuleLifecycleController {
                         rule.targetAuthorized(),
                         monotonicClock.getAsLong() + undoWindowMillis);
         lastUndoToken = undoToken;
-        transientBlockedError = "";
+        clearTransientConflict();
         model =
                 RuleLifecycleModel.from(
                         result.value().orElseThrow().snapshot(), undoToken, "");
         return ServiceResult.success(model);
     }
 
-    private ServiceResult<RuleLifecycleModel> blocked(String message) {
+    private ServiceResult<RuleLifecycleModel> blocked(
+            String message, String targetDeviceId, boolean expectedAuthorization) {
         transientBlockedError = Objects.requireNonNull(message, "message");
-        refresh();
+        transientConflictTargetDeviceId =
+                Objects.requireNonNull(targetDeviceId, "targetDeviceId");
+        transientConflictExpectedAuthorization = expectedAuthorization;
+        refreshLocked(false);
         return ServiceResult.failure(message);
     }
 
     private ServiceResult<RuleLifecycleModel> ensureModel() {
-        return model == null ? refresh() : ServiceResult.success(model);
+        return model == null ? refreshLocked(true) : ServiceResult.success(model);
+    }
+
+    private boolean conflictResolved(RuleStoreSnapshot snapshot) {
+        if (!snapshot.readOnlyFaultMessage().isEmpty()) {
+            return false;
+        }
+        if (transientConflictTargetDeviceId.isEmpty()) {
+            return true;
+        }
+        for (TargetDevice target : snapshot.flowSnapshot().targets()) {
+            if (target.deviceId().equals(transientConflictTargetDeviceId)) {
+                return target.targetAuthorized()
+                        == transientConflictExpectedAuthorization;
+            }
+        }
+        return true;
+    }
+
+    private void clearTransientConflict() {
+        transientBlockedError = "";
+        transientConflictTargetDeviceId = "";
     }
 }

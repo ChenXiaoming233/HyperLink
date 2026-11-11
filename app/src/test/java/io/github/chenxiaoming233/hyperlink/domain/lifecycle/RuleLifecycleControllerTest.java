@@ -6,11 +6,12 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import io.github.chenxiaoming233.hyperlink.domain.ConnectionState;
+import io.github.chenxiaoming233.hyperlink.domain.DeviceType;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationAccessState;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationFlowSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationRule;
-import io.github.chenxiaoming233.hyperlink.domain.TargetDevice;
 import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
+import io.github.chenxiaoming233.hyperlink.domain.TargetDevice;
 import io.github.chenxiaoming233.hyperlink.domain.write.CapabilityEvidence;
 import io.github.chenxiaoming233.hyperlink.domain.write.RuleStoreSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.write.SafeNotificationRuleWriter;
@@ -19,6 +20,13 @@ import io.github.chenxiaoming233.hyperlink.fake.FakeLastKnownGoodStore;
 import io.github.chenxiaoming233.hyperlink.fake.FakeNotificationFlowService;
 import io.github.chenxiaoming233.hyperlink.fake.FakeRuleStoreGateway;
 import io.github.chenxiaoming233.hyperlink.fake.FakeTargetPermissionGateway;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.Test;
 
@@ -171,6 +179,73 @@ public final class RuleLifecycleControllerTest {
     }
 
     @Test
+    public void deleteFailsClosedWhenTargetChangesButAuthorizationBooleanStaysSame() {
+        Fixture fixture = fixture();
+        DeleteConfirmation confirmation =
+                fixture.controller.requestDelete("demo-rule-3").value().orElseThrow();
+        fixture.changeRuleTarget("demo-rule-3", "demo-target-f");
+        int writesBefore = fixture.gateway.writeCount();
+
+        ServiceResult<RuleLifecycleModel> result =
+                fixture.controller.confirmDelete(confirmation, true);
+
+        assertFalse(result.isSuccess());
+        assertTrue(result.userMessage().contains("目标"));
+        assertTrue(fixture.hasRule("demo-rule-3"));
+        assertEquals("demo-target-f", fixture.rule("demo-rule-3").targetDeviceId());
+        assertEquals(writesBefore, fixture.gateway.writeCount());
+        assertEquals(0, fixture.permissions.revokeCount());
+        assertFalse(fixture.target("demo-target-c").targetAuthorized());
+        assertFalse(fixture.target("demo-target-f").targetAuthorized());
+    }
+
+    @Test
+    public void undoFailsClosedWhenTargetChangesButAuthorizationBooleanStaysSame() {
+        Fixture fixture = fixture();
+        RuleUndoToken token =
+                fixture.controller
+                        .pause("demo-rule-1")
+                        .value()
+                        .orElseThrow()
+                        .undoToken()
+                        .orElseThrow();
+        fixture.changeRuleTarget("demo-rule-1", "demo-target-g");
+        int writesBefore = fixture.gateway.writeCount();
+
+        ServiceResult<RuleLifecycleModel> result = fixture.controller.undo(token);
+
+        assertFalse(result.isSuccess());
+        assertTrue(result.userMessage().contains("目标"));
+        assertEquals("paused", fixture.rule("demo-rule-1").status());
+        assertEquals("demo-target-g", fixture.rule("demo-rule-1").targetDeviceId());
+        assertEquals(writesBefore, fixture.gateway.writeCount());
+        assertTrue(fixture.target("demo-target-a").targetAuthorized());
+        assertTrue(fixture.target("demo-target-g").targetAuthorized());
+    }
+
+    @Test
+    public void successfulRecheckClearsTransientConflictAndReenablesActions() {
+        Fixture fixture = fixture();
+        fixture.controller.refresh();
+        fixture.setTargetAuthorization("demo-target-a", false);
+        ServiceResult<RuleLifecycleModel> failed = fixture.controller.pause("demo-rule-1");
+        assertFalse(failed.isSuccess());
+        assertFalse(fixture.controller.model().blockedError().isEmpty());
+        assertFalse(fixture.controller.model().rule("demo-rule-1").orElseThrow().canPause());
+        ServiceResult<RuleLifecycleModel> stillBlocked = fixture.controller.refresh();
+        assertTrue(stillBlocked.isSuccess());
+        assertFalse(stillBlocked.value().orElseThrow().blockedError().isEmpty());
+
+        fixture.setTargetAuthorization("demo-target-a", true);
+        ServiceResult<RuleLifecycleModel> recovered = fixture.controller.refresh();
+
+        assertTrue(recovered.isSuccess());
+        assertTrue(recovered.value().orElseThrow().blockedError().isEmpty());
+        assertTrue(recovered.value().orElseThrow().rule("demo-rule-1").orElseThrow().canPause());
+        assertTrue(fixture.controller.pause("demo-rule-1").isSuccess());
+    }
+
+    @Test
     public void missingOrRevokedNotificationAccessBlocksAffectedRulesAndExposesSettingsIntent() {
         for (NotificationAccessState access :
                 new NotificationAccessState[] {
@@ -183,6 +258,8 @@ public final class RuleLifecycleControllerTest {
 
             assertTrue(model.rule("demo-rule-1").orElseThrow().blocked());
             assertTrue(model.rule("demo-rule-1").orElseThrow().blockedMessage().contains("系统通知使用权"));
+            assertEquals("受阻", model.rule("demo-rule-1").orElseThrow().displayStatus());
+            assertFalse(model.rule("demo-rule-1").orElseThrow().canPause());
             assertFalse(model.rule("demo-rule-2").orElseThrow().blocked());
             NotificationAccessSettingsIntentSpec settings =
                     model.notificationAccessSettingsIntent().orElseThrow();
@@ -192,9 +269,74 @@ public final class RuleLifecycleControllerTest {
         }
     }
 
+    @Test(timeout = 5_000L)
+    public void controllerSerializesRefreshAndStateChangesAroundPermissionRevocation()
+            throws Exception {
+        NotificationFlowSnapshot snapshot = augmentedDemoSnapshot();
+        SourceDevice source = new SourceDevice("demo-source-phone", "Demo-Phone");
+        FakeRuleStoreGateway gateway =
+                new FakeRuleStoreGateway(
+                        new RuleStoreSnapshot(
+                                snapshot,
+                                source,
+                                CapabilityEvidence.demoComplete(),
+                                false,
+                                false));
+        SafeNotificationRuleWriter writer =
+                new SafeNotificationRuleWriter(gateway, new FakeLastKnownGoodStore());
+        FakeTargetPermissionGateway delegate = new FakeTargetPermissionGateway(gateway);
+        CountDownLatch revokeEntered = new CountDownLatch(1);
+        CountDownLatch releaseRevoke = new CountDownLatch(1);
+        TargetPermissionGateway blockingPermissions =
+                targetId -> {
+                    revokeEntered.countDown();
+                    await(releaseRevoke);
+                    return delegate.revoke(targetId);
+                };
+        RuleLifecycleController controller =
+                new RuleLifecycleController(
+                        gateway,
+                        writer,
+                        blockingPermissions,
+                        new AtomicLong(1_000L)::get,
+                        UNDO_WINDOW_MILLIS);
+        controller.refresh();
+        DeleteConfirmation confirmation =
+                controller.requestDelete("demo-rule-1").value().orElseThrow();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<ServiceResult<RuleLifecycleModel>> deletion =
+                    executor.submit(() -> controller.confirmDelete(confirmation, true));
+            assertTrue(revokeEntered.await(2L, TimeUnit.SECONDS));
+
+            CountDownLatch pauseStarted = new CountDownLatch(1);
+            CountDownLatch pauseFinished = new CountDownLatch(1);
+            Future<ServiceResult<RuleLifecycleModel>> pause =
+                    executor.submit(
+                            () -> {
+                                pauseStarted.countDown();
+                                try {
+                                    return controller.pause("demo-rule-3");
+                                } finally {
+                                    pauseFinished.countDown();
+                                }
+                            });
+            assertTrue(pauseStarted.await(2L, TimeUnit.SECONDS));
+            assertFalse(pauseFinished.await(300L, TimeUnit.MILLISECONDS));
+
+            releaseRevoke.countDown();
+            assertTrue(deletion.get(2L, TimeUnit.SECONDS).isSuccess());
+            assertTrue(pause.get(2L, TimeUnit.SECONDS).isSuccess());
+            assertEquals("paused", rule(gateway, "demo-rule-3").status());
+            assertTrue(controller.model().undoToken().isPresent());
+        } finally {
+            releaseRevoke.countDown();
+            executor.shutdownNow();
+        }
+    }
+
     private static Fixture fixture() {
-        NotificationFlowSnapshot snapshot =
-                FakeNotificationFlowService.demoSnapshot(ConnectionState.CONNECTED);
+        NotificationFlowSnapshot snapshot = augmentedDemoSnapshot();
         SourceDevice source = new SourceDevice("demo-source-phone", "Demo-Phone");
         FakeRuleStoreGateway gateway =
                 new FakeRuleStoreGateway(
@@ -212,6 +354,56 @@ public final class RuleLifecycleControllerTest {
                 new RuleLifecycleController(
                         gateway, writer, permissions, clock::get, UNDO_WINDOW_MILLIS);
         return new Fixture(snapshot, gateway, writer, permissions, clock, controller);
+    }
+
+    private static NotificationFlowSnapshot augmentedDemoSnapshot() {
+        NotificationFlowSnapshot base =
+                FakeNotificationFlowService.demoSnapshot(ConnectionState.CONNECTED);
+        List<TargetDevice> targets = new ArrayList<>(base.targets());
+        targets.add(
+                new TargetDevice(
+                        "demo-target-f",
+                        "Demo-Pad-B",
+                        DeviceType.PAD,
+                        true,
+                        true,
+                        false,
+                        true));
+        targets.add(
+                new TargetDevice(
+                        "demo-target-g",
+                        "Demo-PC-B",
+                        DeviceType.PC,
+                        true,
+                        true,
+                        true,
+                        true));
+        return new NotificationFlowSnapshot(
+                base.connectionState(),
+                base.stateVersion(),
+                base.compatibilityUnverified(),
+                targets,
+                base.rules(),
+                base.notificationAccess(),
+                base.staleCache());
+    }
+
+    private static NotificationRule rule(FakeRuleStoreGateway gateway, String ruleId) {
+        for (NotificationRule rule : gateway.currentRules()) {
+            if (rule.ruleId().equals(ruleId)) {
+                return rule;
+            }
+        }
+        throw new AssertionError("Missing rule " + ruleId);
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting for test gate.", exception);
+        }
     }
 
     private static final class Fixture {
@@ -280,6 +472,30 @@ public final class RuleLifecycleControllerTest {
             }
             gateway.replaceSnapshot(
                     gateway.snapshot().withPermissions(authorizations, access));
+        }
+
+        private void changeRuleTarget(String ruleId, String targetDeviceId) {
+            NotificationRule current = rule(ruleId);
+            TargetDevice target = target(targetDeviceId);
+            List<NotificationRule> rules = new ArrayList<>();
+            for (NotificationRule candidate : gateway.currentRules()) {
+                if (candidate.ruleId().equals(ruleId)) {
+                    rules.add(
+                            new NotificationRule(
+                                    current.ruleId(),
+                                    current.sourceDeviceId(),
+                                    current.sourceDeviceName(),
+                                    target.deviceId(),
+                                    target.displayName(),
+                                    current.status(),
+                                    current.summary(),
+                                    current.dslJson(),
+                                    current.createdAt()));
+                } else {
+                    rules.add(candidate);
+                }
+            }
+            gateway.replaceSnapshot(gateway.snapshot().withRules(rules));
         }
     }
 }
