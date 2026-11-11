@@ -1,8 +1,8 @@
 # HyperLink 开发与测试
 
 当前阶段包含可离线验证的模块骨架、领域接口、RPC 纯层、fake 场景面板、fake 安全写入
-事务层和 fake 结构化规则编辑器。它不包含真实 LSPosed Hook、VoiceAssist Provider 接线
-或设备级兼容性验收。
+事务层、fake 结构化规则编辑器和 fake 规则生命周期控制。它不包含真实 LSPosed Hook、
+VoiceAssist Provider 接线或设备级兼容性验收。
 
 ## fake 只读面板
 
@@ -90,6 +90,26 @@ IM、焦点通知和短信验证码只是临时编辑模板。展开后分别变
 系统通知使用权和兼容性未验收等提示，不以通用成功文案覆盖。完整快照若已存在重复
 source+target 规则，writer 会进入持久只读故障态且不执行 upsert，避免静默删除重复规则。
 
+## fake 规则生命周期
+
+结构化编辑器通过 `RuleLifecycleController`、`SafeNotificationRuleWriter` 和
+`FakeTargetPermissionGateway` 演示暂停、恢复、撤销与删除。暂停只把原规则状态改为
+`paused`，恢复只改回 `active`；两者都复用原 `ruleId`、筛选 DSL、摘要、目标、创建时间和
+目标授权，并沿用安全写入器的 LKG、串行写入、乐观并发与回读校验，不直接修改 JSON。
+操作成功返回新 UI 模型和 `RuleUndoToken`，编辑器的演示撤销窗口为 10 秒；token 带单调
+序号和到期时间，过期、被新操作替换或已被消费的撤销请求会失败且不写入。
+
+删除必须由 `requestDelete()` 生成一次性确认对象，确认文案明确删除会撤销目标授权；
+取消确认不会调用规则写入或权限 gateway。确认后先从 fake store 删除规则，再通过
+`TargetPermissionGateway` 撤销目标授权。权限撤销失败时规则删除已发生，但操作返回失败，
+并写入只读故障态；UI 显示阻断错误，不伪造完整成功。
+
+生命周期操作会携带 UI 上次观察到的目标授权值。外部授权变化与预期不一致时，安全写入器
+拒绝变更并显示阻塞错误，不会静默重新授权、写回旧授权或覆盖外部状态。系统通知使用权
+只从 fake 快照检测；`MISSING` / `REVOKED` 时活动规则显示受阻，并提供纯层可测的
+`NotificationAccessSettingsIntentSpec`，只读面板据此打开系统设置页。该入口不调用任何
+授权写入 API。所有规则、目标、设备名和授权均来自 Demo/demo 合成数据。
+
 ## 环境
 
 - JDK 17
@@ -125,7 +145,9 @@ DSL/状态结构校验、兼容性标记合并、LKG 保存异常、系统通知
 默认应用集合与全部已安装切换、未安装引用保留、名称回退包名，以及编辑 paused 规则时
 复用安全写入链路并保留 `ruleId`、`status`、`createdAt` 且不产生重复规则。纯层 UI 测试
 额外覆盖授权允许/拒绝、离线显式确认、notes 全量反馈，以及 A/B 两个分支的 app 条件
-作用域隔离；安全写入测试覆盖重复 source+target 快照 fail-closed。
+作用域隔离；安全写入测试覆盖重复 source+target 快照 fail-closed。生命周期 fake 测试
+覆盖暂停持久化、恢复复用 `ruleId`、撤销成功与过期、删除确认/取消、目标授权撤销成功与
+失败、外部授权变化阻塞，以及系统通知使用权缺失/撤销和设置 Intent 描述。
 
 ## 构建 APK
 

@@ -1,6 +1,8 @@
 package io.github.chenxiaoming233.hyperlink.ui;
 
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -18,6 +20,7 @@ import io.github.chenxiaoming233.hyperlink.domain.ConnectionState;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationAccessState;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationFlowSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
+import io.github.chenxiaoming233.hyperlink.domain.lifecycle.NotificationAccessSettingsIntentSpec;
 import io.github.chenxiaoming233.hyperlink.fake.FakeNotificationFlowService;
 
 public final class SettingsActivity extends Activity {
@@ -35,6 +38,7 @@ public final class SettingsActivity extends Activity {
     private TextView compatibilityBadge;
     private TextView staleCacheBadge;
     private TextView notificationAccess;
+    private Button notificationAccessSettingsButton;
     private TextView stateVersion;
     private Button retryButton;
     private Spinner stateSelector;
@@ -167,6 +171,11 @@ public final class SettingsActivity extends Activity {
         notificationAccess.setLineSpacing(0f, 1.2f);
         notificationAccess.setPadding(0, 0, 0, dp(8));
         page.addView(notificationAccess);
+        notificationAccessSettingsButton = new Button(this);
+        notificationAccessSettingsButton.setText("打开系统通知使用权设置");
+        notificationAccessSettingsButton.setOnClickListener(
+                view -> openNotificationAccessSettings());
+        page.addView(notificationAccessSettingsButton);
 
         RuleEditorPanel ruleEditorPanel = new RuleEditorPanel(this);
         LinearLayout.LayoutParams editorParams = matchWrap();
@@ -267,6 +276,12 @@ public final class SettingsActivity extends Activity {
                 model.notificationAccessBlocked()
                         ? Color.rgb(156, 50, 35)
                         : Color.rgb(45, 91, 62));
+        notificationAccessSettingsButton.setVisibility(
+                snapshot != null
+                                && snapshot.notificationAccess()
+                                        != NotificationAccessState.GRANTED
+                        ? View.VISIBLE
+                        : View.GONE);
         stateVersion.setText(
                 snapshot == null
                         ? "状态版本：未知 · 只读"
@@ -287,6 +302,18 @@ public final class SettingsActivity extends Activity {
         }
         if (model.rules().isEmpty()) {
             ruleContainer.addView(emptySectionText(model.ruleSectionPlaceholder()));
+        }
+    }
+
+    private void openNotificationAccessSettings() {
+        NotificationAccessSettingsIntentSpec spec =
+                NotificationAccessSettingsIntentSpec.systemSettings();
+        try {
+            startActivity(new Intent(spec.action()));
+        } catch (ActivityNotFoundException exception) {
+            stateMessage.setText(
+                    "当前系统没有可处理通知使用权设置页的 Activity；"
+                            + "未调用任何授权写入 API。");
         }
     }
 

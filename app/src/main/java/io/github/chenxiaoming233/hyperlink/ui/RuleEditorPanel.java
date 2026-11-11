@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.os.SystemClock;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
@@ -30,6 +31,10 @@ import io.github.chenxiaoming233.hyperlink.domain.editor.RuleBranch;
 import io.github.chenxiaoming233.hyperlink.domain.editor.RuleCondition;
 import io.github.chenxiaoming233.hyperlink.domain.editor.RulePreset;
 import io.github.chenxiaoming233.hyperlink.domain.editor.StructuredRuleDraft;
+import io.github.chenxiaoming233.hyperlink.domain.lifecycle.DeleteConfirmation;
+import io.github.chenxiaoming233.hyperlink.domain.lifecycle.RuleLifecycleController;
+import io.github.chenxiaoming233.hyperlink.domain.lifecycle.RuleLifecycleModel;
+import io.github.chenxiaoming233.hyperlink.domain.lifecycle.RuleUndoToken;
 import io.github.chenxiaoming233.hyperlink.domain.write.CapabilityEvidence;
 import io.github.chenxiaoming233.hyperlink.domain.write.ConfirmedTargetSelection;
 import io.github.chenxiaoming233.hyperlink.domain.write.RuleCreationResult;
@@ -43,6 +48,7 @@ import io.github.chenxiaoming233.hyperlink.fake.FakeAppCatalog;
 import io.github.chenxiaoming233.hyperlink.fake.FakeLastKnownGoodStore;
 import io.github.chenxiaoming233.hyperlink.fake.FakeNotificationFlowService;
 import io.github.chenxiaoming233.hyperlink.fake.FakeRuleStoreGateway;
+import io.github.chenxiaoming233.hyperlink.fake.FakeTargetPermissionGateway;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -57,6 +63,7 @@ final class RuleEditorPanel extends LinearLayout {
     private final List<AppCatalogEntry> catalogApps;
     private final FakeRuleStoreGateway gateway;
     private final SafeNotificationRuleWriter writer;
+    private final RuleLifecycleController lifecycleController;
     private final TargetSelectionFlow targetSelectionFlow;
     private final Set<RulePreset> selectedPresets = new LinkedHashSet<>();
     private final List<CheckBox> presetChecks = new ArrayList<>();
@@ -76,6 +83,7 @@ final class RuleEditorPanel extends LinearLayout {
     private LinearLayout existingRulesContainer;
     private TextView summaryView;
     private TextView statusView;
+    private RuleUndoToken undoToken;
 
     RuleEditorPanel(Activity activity) {
         super(activity);
@@ -96,6 +104,13 @@ final class RuleEditorPanel extends LinearLayout {
                                 false));
         this.writer =
                 new SafeNotificationRuleWriter(gateway, new FakeLastKnownGoodStore());
+        this.lifecycleController =
+                new RuleLifecycleController(
+                        gateway,
+                        writer,
+                        new FakeTargetPermissionGateway(gateway),
+                        SystemClock::elapsedRealtime,
+                        10_000L);
         this.targetSelectionFlow = new TargetSelectionFlow(snapshot);
         this.draft = StructuredRuleDraft.empty(System.currentTimeMillis());
         this.selectedTargetId = targets.isEmpty() ? "" : targets.get(0).deviceId();
@@ -787,26 +802,158 @@ final class RuleEditorPanel extends LinearLayout {
             return;
         }
         existingRulesContainer.removeAllViews();
-        for (NotificationRule rule : gateway.currentRules()) {
-            existingRulesContainer.addView(createExistingRuleCard(rule));
+        ServiceResult<RuleLifecycleModel> refreshed = lifecycleController.refresh();
+        if (!refreshed.isSuccess()) {
+            existingRulesContainer.addView(
+                    text(refreshed.userMessage(), 14, Color.rgb(156, 50, 35)));
+            return;
+        }
+        RuleLifecycleModel model = refreshed.value().orElseThrow();
+        undoToken = model.undoToken().orElse(null);
+        if (!model.blockedError().isEmpty()) {
+            existingRulesContainer.addView(
+                    text(model.blockedError(), 14, Color.rgb(156, 50, 35)));
+        }
+        if (undoToken != null) {
+            Button undo = actionButton("撤销最近的暂停/恢复");
+            undo.setOnClickListener(view -> undoLifecycleChange(undoToken));
+            existingRulesContainer.addView(undo);
+        }
+        for (RuleLifecycleModel.RuleItem item : model.rules()) {
+            NotificationRule stored = findStoredRule(item.ruleId());
+            if (stored != null) {
+                existingRulesContainer.addView(createExistingRuleCard(item, stored));
+            }
         }
     }
 
-    private View createExistingRuleCard(NotificationRule rule) {
+    private View createExistingRuleCard(
+            RuleLifecycleModel.RuleItem item, NotificationRule rule) {
         LinearLayout card = card();
         TextView heading = text(rule.ruleId(), 15, Color.rgb(30, 38, 36));
         heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         card.addView(heading);
         card.addView(
                 text(
-                        "状态：" + rule.status() + " · 创建时间：" + rule.createdAt(),
+                        "状态："
+                                + item.displayStatus()
+                                + "（原始值："
+                                + rule.status()
+                                + "） · 创建时间："
+                                + rule.createdAt(),
+                        13,
+                        Color.rgb(111, 119, 114)));
+        card.addView(
+                text(
+                        "目标："
+                                + item.targetDeviceName()
+                                + " · 目标授权："
+                                + (item.targetAuthorized() ? "已授权" : "未授权"),
                         13,
                         Color.rgb(111, 119, 114)));
         card.addView(text(rule.summary(), 14, Color.rgb(50, 58, 54)));
+        if (!item.blockedMessage().isEmpty()) {
+            card.addView(
+                    text(item.blockedMessage(), 13, Color.rgb(156, 50, 35)));
+        }
+        LinearLayout actions = actionRow();
+        if (item.canPause()) {
+            actions.addView(
+                    smallButton(
+                            "暂停规则",
+                            view -> pauseRule(item.ruleId())));
+        }
+        if (item.canResume()) {
+            actions.addView(
+                    smallButton(
+                            "恢复规则",
+                            view -> resumeRule(item.ruleId())));
+        }
+        if (item.canDelete()) {
+            actions.addView(
+                    smallButton(
+                            "删除规则",
+                            view -> requestDeleteRule(item.ruleId())));
+        }
         Button edit = actionButton("载入并编辑");
         edit.setOnClickListener(view -> loadRule(rule));
-        card.addView(edit);
+        actions.addView(edit);
+        card.addView(actions);
         return card;
+    }
+
+    private void pauseRule(String ruleId) {
+        completeLifecycleChange(
+                lifecycleController.pause(ruleId),
+                "规则已暂停并持久化为 paused；可在 10 秒内撤销。");
+    }
+
+    private void resumeRule(String ruleId) {
+        completeLifecycleChange(
+                lifecycleController.resume(ruleId),
+                "规则已恢复为 active，并复用原 ruleId；可在 10 秒内撤销。");
+    }
+
+    private void undoLifecycleChange(RuleUndoToken token) {
+        completeLifecycleChange(
+                lifecycleController.undo(token),
+                "已撤销最近一次暂停/恢复操作。");
+    }
+
+    private void completeLifecycleChange(
+            ServiceResult<RuleLifecycleModel> result, String successMessage) {
+        refreshExistingRules();
+        if (!result.isSuccess()) {
+            setStatus(result.userMessage());
+            return;
+        }
+        undoToken = result.value().orElseThrow().undoToken().orElse(null);
+        refreshExistingRules();
+        setStatus(successMessage);
+    }
+
+    private void requestDeleteRule(String ruleId) {
+        ServiceResult<DeleteConfirmation> requested =
+                lifecycleController.requestDelete(ruleId);
+        if (!requested.isSuccess()) {
+            setStatus(requested.userMessage());
+            return;
+        }
+        DeleteConfirmation confirmation = requested.value().orElseThrow();
+        new AlertDialog.Builder(activity)
+                .setTitle("确认删除规则并撤销目标授权")
+                .setMessage(confirmation.prompt())
+                .setPositiveButton(
+                        "确认删除并撤销授权",
+                        (dialog, which) -> completeDelete(confirmation, true))
+                .setNegativeButton(
+                        "取消",
+                        (dialog, which) -> completeDelete(confirmation, false))
+                .show();
+    }
+
+    private void completeDelete(DeleteConfirmation confirmation, boolean confirmed) {
+        ServiceResult<RuleLifecycleModel> result =
+                lifecycleController.confirmDelete(confirmation, confirmed);
+        refreshExistingRules();
+        if (!result.isSuccess()) {
+            setStatus(result.userMessage());
+        } else if (!confirmed) {
+            setStatus("已取消删除；未写入规则，也未撤销目标授权。");
+        } else {
+            setStatus(
+                    "规则已删除，并已通过 fake 权限 gateway 撤销目标授权；"
+                            + "未连接真实系统授权 API。");
+        }
+    }
+
+    private NotificationRule findStoredRule(String ruleId) {
+        for (NotificationRule rule : gateway.currentRules()) {
+            if (rule.ruleId().equals(ruleId)) {
+                return rule;
+            }
+        }
+        return null;
     }
 
     private String conditionText(RuleCondition condition) {
