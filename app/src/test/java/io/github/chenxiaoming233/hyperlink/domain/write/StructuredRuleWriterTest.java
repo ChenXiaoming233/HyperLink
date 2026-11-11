@@ -160,6 +160,45 @@ public final class StructuredRuleWriterTest {
         assertEquals(2, matchingRuleCount(gateway.currentRules(), "demo-target-a"));
     }
 
+    @Test
+    public void editingOneRuleLeavesEveryOtherRuleBitForBitUnchanged() {
+        Fixture fixture = fixture(FakeNotificationFlowService.demoSnapshot(ConnectionState.CONNECTED));
+        List<NotificationRule> original = new ArrayList<>(fixture.gateway.currentRules());
+        NotificationRule target = original.get(1);
+        StructuredRuleDraft parsed = StructuredRuleDsl.parse(target);
+        RuleBranch changedBranch =
+                RuleBranch.of(
+                        RuleCondition.appIn(List.of("demo.app.chat")),
+                        RuleCondition.senderRegex("acme-.*"),
+                        RuleCondition.textNotRegex("广告"),
+                        RuleCondition.isVerifyCode(true));
+        StructuredRuleDraft changed =
+                parsed.replaceGroup(0, RuleAndGroup.of(changedBranch))
+                        .withStatus("active");
+
+        fixture.writer
+                .saveStructuredRule(confirmed(fixture, target.targetDeviceId()), changed)
+                .value()
+                .orElseThrow();
+
+        List<NotificationRule> updated = fixture.gateway.currentRules();
+        assertEquals(original.size(), updated.size());
+        for (int index = 0; index < original.size(); index++) {
+            assertEquals(original.get(index).ruleId(), updated.get(index).ruleId());
+            if (index != 1) {
+                assertSameRule(original.get(index), updated.get(index));
+            }
+        }
+        NotificationRule saved = updated.get(1);
+        assertEquals(target.ruleId(), saved.ruleId());
+        assertEquals(target.status(), saved.status());
+        assertEquals(target.createdAt(), saved.createdAt());
+        assertTrue(saved.dslJson().contains("\"field\":\"sender\""));
+        assertTrue(saved.dslJson().contains("\"field\":\"text\""));
+        assertSameRule(original.get(0), updated.get(0));
+        assertSameRule(original.get(2), updated.get(2));
+    }
+
     private static Fixture fixture(NotificationFlowSnapshot flow) {
         RuleStoreSnapshot snapshot =
                 new RuleStoreSnapshot(
@@ -226,6 +265,18 @@ public final class StructuredRuleWriterTest {
             position += needle.length();
         }
         return count;
+    }
+
+    private static void assertSameRule(NotificationRule expected, NotificationRule actual) {
+        assertEquals(expected.ruleId(), actual.ruleId());
+        assertEquals(expected.sourceDeviceId(), actual.sourceDeviceId());
+        assertEquals(expected.sourceDeviceName(), actual.sourceDeviceName());
+        assertEquals(expected.targetDeviceId(), actual.targetDeviceId());
+        assertEquals(expected.targetDeviceName(), actual.targetDeviceName());
+        assertEquals(expected.status(), actual.status());
+        assertEquals(expected.summary(), actual.summary());
+        assertEquals(expected.dslJson(), actual.dslJson());
+        assertEquals(expected.createdAt(), actual.createdAt());
     }
 
     private static final class Fixture {

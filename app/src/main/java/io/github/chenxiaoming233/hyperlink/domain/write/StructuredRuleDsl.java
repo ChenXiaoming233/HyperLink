@@ -38,8 +38,10 @@ public final class StructuredRuleDsl {
     }
 
     public static StructuredRuleDraft parse(NotificationRule rule) {
-        if (!RuleDslValidator.isValid(rule.dslJson())) {
-            throw new IllegalArgumentException("Rule DSL cannot be edited as structured conditions");
+        String issue = RuleDslValidator.issue(rule.dslJson());
+        if (!issue.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Rule DSL cannot be edited as structured conditions: " + issue);
         }
         Map<String, Object> root = castMap(RuleDslValidator.parse(rule.dslJson()));
         List<RuleAndGroup> groups = new ArrayList<>();
@@ -80,6 +82,9 @@ public final class StructuredRuleDsl {
                 .append(",\"value\":");
         if (condition.field() == RuleCondition.Field.APP) {
             json.append(RuleSerialization.quote(appListJson(condition.appPackages())));
+        } else if (condition.field() == RuleCondition.Field.SENDER
+                || condition.field() == RuleCondition.Field.TEXT) {
+            json.append(RuleSerialization.quote(condition.pattern()));
         } else {
             json.append(RuleSerialization.quote(condition.booleanValue() ? "true" : "false"));
         }
@@ -98,6 +103,16 @@ public final class StructuredRuleDsl {
             return "not_in".equals(operator)
                     ? RuleCondition.appNotIn(packages)
                     : RuleCondition.appIn(packages);
+        }
+        if ("sender".equals(field)) {
+            return "not_regex".equals(operator)
+                    ? RuleCondition.senderNotRegex(value)
+                    : RuleCondition.senderRegex(value);
+        }
+        if ("text".equals(field)) {
+            return "not_regex".equals(operator)
+                    ? RuleCondition.textNotRegex(value)
+                    : RuleCondition.textRegex(value);
         }
         boolean booleanValue = Boolean.parseBoolean(value);
         return "isIsland".equals(field)
@@ -124,6 +139,10 @@ public final class StructuredRuleDsl {
                 return "isIsland";
             case VERIFY_CODE:
                 return "isVerifyCode";
+            case SENDER:
+                return "sender";
+            case TEXT:
+                return "text";
             default:
                 throw new IllegalStateException("Unhandled condition field " + field);
         }
@@ -137,6 +156,10 @@ public final class StructuredRuleDsl {
                 return "not_in";
             case IS:
                 return "is";
+            case REGEX:
+                return "regex";
+            case NOT_REGEX:
+                return "not_regex";
             default:
                 throw new IllegalStateException("Unhandled condition operator " + operator);
         }

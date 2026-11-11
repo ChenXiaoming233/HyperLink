@@ -65,4 +65,13 @@ public final class CapabilityProbeTest {
 
         assertFalse(CapabilityProbe.evaluate(withoutMode).passed());
     }
+
+    @Test
+    public void advancedRegexDslIsPartOfTheProbe() {
+        CapabilityEvidence withoutRegex =
+                CapabilityEvidence.demoComplete()
+                        .without(CapabilityKind.DSL_STRUCTURE, "regex");
+
+        assertFalse(CapabilityProbe.evaluate(withoutRegex).passed());
+    }
 }
