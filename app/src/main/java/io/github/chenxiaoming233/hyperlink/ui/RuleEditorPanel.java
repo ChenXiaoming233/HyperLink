@@ -62,7 +62,15 @@ final class RuleEditorPanel extends LinearLayout {
     private final TargetSelectionFlow targetSelectionFlow;
     private final Set<RulePreset> selectedPresets = new LinkedHashSet<>();
     private final List<CheckBox> presetChecks = new ArrayList<>();
-    private final List<View> modelEditableViews = new ArrayList<>();
+    private final EditableViewTracker<View> persistentEditableViews =
+            new EditableViewTracker<>();
+    private final EditableViewTracker<View> appEditableViews =
+            new EditableViewTracker<>();
+    private final EditableViewTracker<View> structureEditableViews =
+            new EditableViewTracker<>();
+    private final EditableViewTracker<View> existingRuleEditableViews =
+            new EditableViewTracker<>();
+    private final RuleEditorMutationGate mutationGate;
 
     private StructuredRuleDraft draft;
     private AppConditionEditorModel appEditor;
@@ -103,6 +111,7 @@ final class RuleEditorPanel extends LinearLayout {
                 new SafeNotificationRuleWriter(gateway, new FakeLastKnownGoodStore());
         this.targetSelectionFlow = new TargetSelectionFlow(snapshot);
         this.modelReadiness = RuleModelReadiness.inspect(gateway);
+        this.mutationGate = new RuleEditorMutationGate(modelReadiness);
         this.draft = StructuredRuleDraft.empty(System.currentTimeMillis());
         this.selectedTargetId = targets.isEmpty() ? "" : targets.get(0).deviceId();
         setOrientation(VERTICAL);
@@ -336,6 +345,7 @@ final class RuleEditorPanel extends LinearLayout {
                         .withShowAllInstalled(showAllApps)
                         .withSearchQuery(appQuery);
         appScopeView.setText(appScopeText());
+        appEditableViews.clear();
         appItemsContainer.removeAllViews();
         updatingApps = true;
         try {
@@ -375,10 +385,18 @@ final class RuleEditorPanel extends LinearLayout {
                         + item.statusLabel());
         check.setTextSize(14);
         check.setChecked(item.selected());
-        check.setEnabled(modelReadiness.writable() && appEditor != null);
         check.setOnCheckedChangeListener(
                 (button, checked) -> {
                     if (updatingApps) {
+                        return;
+                    }
+                    if (rejectWhenReadOnly()) {
+                        updatingApps = true;
+                        try {
+                            button.setChecked(item.selected());
+                        } finally {
+                            updatingApps = false;
+                        }
                         return;
                     }
                     if (appEditor == null) {
@@ -388,6 +406,8 @@ final class RuleEditorPanel extends LinearLayout {
                     appEditor = appEditor.togglePackage(item.packageName());
                     refreshApps();
                 });
+        trackAppEditable(check);
+        check.setEnabled(modelReadiness.writable() && appEditor != null);
         LinearLayout.LayoutParams checkParams =
                 new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
         checkParams.leftMargin = dp(8);
@@ -400,6 +420,7 @@ final class RuleEditorPanel extends LinearLayout {
             return;
         }
         summaryView.setText("自动摘要：" + draft.summary());
+        structureEditableViews.clear();
         structureContainer.removeAllViews();
         if (draft.groups().isEmpty()) {
             structureContainer.addView(
@@ -994,6 +1015,7 @@ final class RuleEditorPanel extends LinearLayout {
         if (existingRulesContainer == null) {
             return;
         }
+        existingRuleEditableViews.clear();
         existingRulesContainer.removeAllViews();
         for (NotificationRule rule : gateway.currentRules()) {
             existingRulesContainer.addView(createExistingRuleCard(rule));
@@ -1011,7 +1033,8 @@ final class RuleEditorPanel extends LinearLayout {
                         13,
                         Color.rgb(111, 119, 114)));
         card.addView(text(rule.summary(), 14, Color.rgb(50, 58, 54)));
-        Button edit = actionButton("载入并编辑");
+        Button edit = rawActionButton("载入并编辑");
+        trackExistingRuleEditable(edit);
         edit.setOnClickListener(view -> loadRule(rule));
         card.addView(edit);
         return card;
@@ -1088,6 +1111,10 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void applyModelReadiness() {
+        if (modelReadiness == null) {
+            return;
+        }
+        mutationGate.update(modelReadiness);
         if (modelReadinessView != null) {
             if (modelReadiness.writable()) {
                 modelReadinessView.setText(
@@ -1103,22 +1130,21 @@ final class RuleEditorPanel extends LinearLayout {
                 modelReadinessView.setBackgroundColor(Color.rgb(251, 226, 216));
             }
         }
-        if (modelReadiness == null) {
-            return;
-        }
         boolean writable = modelReadiness.writable();
-        for (View view : modelEditableViews) {
-            view.setEnabled(writable);
-        }
+        persistentEditableViews.forEach(view -> view.setEnabled(writable));
+        structureEditableViews.forEach(view -> view.setEnabled(writable));
+        existingRuleEditableViews.forEach(view -> view.setEnabled(writable));
+        appEditableViews.forEach(
+                view -> view.setEnabled(writable && appEditor != null));
     }
 
     private boolean rejectWhenReadOnly() {
-        if (modelReadiness.writable()) {
+        if (mutationGate.writable()) {
             return false;
         }
         setStatus(
                 "整份规则模型为只读："
-                        + modelReadiness.reason()
+                        + mutationGate.reason()
                         + " 未执行编辑或保存；请修复 fake 快照后重新检测。");
         return true;
     }
@@ -1144,7 +1170,8 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private Button smallButton(String label, OnClickListener listener) {
-        Button button = actionButton(label);
+        Button button = rawActionButton(label);
+        trackStructureEditable(button);
         button.setTextSize(12);
         button.setMinWidth(0);
         button.setMinimumWidth(0);
@@ -1153,7 +1180,24 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private <T extends View> T trackEditable(T view) {
-        modelEditableViews.add(view);
+        persistentEditableViews.track(view);
+        view.setEnabled(modelReadiness != null && modelReadiness.writable());
+        return view;
+    }
+
+    private <T extends View> T trackAppEditable(T view) {
+        appEditableViews.track(view);
+        return view;
+    }
+
+    private <T extends View> T trackStructureEditable(T view) {
+        structureEditableViews.track(view);
+        view.setEnabled(modelReadiness != null && modelReadiness.writable());
+        return view;
+    }
+
+    private <T extends View> T trackExistingRuleEditable(T view) {
+        existingRuleEditableViews.track(view);
         view.setEnabled(modelReadiness != null && modelReadiness.writable());
         return view;
     }
