@@ -66,6 +66,8 @@ public final class SafeNotificationRuleWriter {
         if (!current.readOnlyFaultMessage().isEmpty()) {
             return ServiceResult.failure(current.readOnlyFaultMessage());
         }
+        long expectedStoreVersion = current.storeVersion();
+        List<NotificationRule> expectedRules = current.rules();
         NotificationFlowSnapshot flow = current.flowSnapshot();
         if (flow.staleCache()
                 || (flow.connectionState() != ConnectionState.CONNECTED
@@ -119,33 +121,46 @@ public final class SafeNotificationRuleWriter {
 
         ServiceResult<RuleWriteReceipt> writeResult;
         try {
-            writeResult = gateway.write(candidate);
+            writeResult = gateway.write(candidate, expectedStoreVersion, expectedRules);
         } catch (RuntimeException exception) {
-            return failAndRollback(lkg, "规则写入异常，");
+            return failAfterWriteAttempt(
+                    lkg, current, "规则写入异常，");
         }
         if (!writeResult.isSuccess()) {
-            return failAndRollback(lkg, "规则写入未完成，");
+            return failAfterWriteAttempt(
+                    lkg, current, "规则写入未完成，");
         }
+        RuleWriteReceipt receipt = writeResult.value().orElseThrow();
 
         ServiceResult<RuleStoreSnapshot> readBack;
         try {
             readBack = gateway.read();
         } catch (RuntimeException exception) {
-            return failAndRollback(lkg, "写入后回读异常，");
+            return failAfterCommittedReadFailure(
+                    lkg, receipt, "写入后回读异常，");
         }
         if (!readBack.isSuccess()) {
-            return failAndRollback(lkg, "写入后无法回读规则，");
+            return failAfterCommittedReadFailure(
+                    lkg, receipt, "写入后无法回读规则，");
         }
         RuleStoreSnapshot verified = readBack.value().orElseThrow();
-        if (hasUnsafeStructure(verified)
+        if (!verified.readOnlyFaultMessage().isEmpty()
+                || verified.storeVersion() != receipt.storeVersion()
+                || hasUnsafeStructure(verified)
+                || !lkg.targetStatesMatch(verified)
                 || !lkg.permissionsMatch(verified)
-                || !writeResult.value().orElseThrow().serializedJson().equals(expectedSerialized)
+                || !receipt.serializedJson().equals(expectedSerialized)
                 || !verified.serializedJson().equals(expectedSerialized)
                 || !matchesRules(candidate, verified.rules())
                 || !uniqueRuleIds(candidate)
                 || matchingTargetCount(candidate, createdRule) != 1
                 || !targetRuleMatches(candidate, createdRule)) {
-            return failAndRollback(lkg, "写入后校验失败，");
+            return failAfterCommittedWrite(
+                    lkg, receipt, verified, "写入后校验失败，");
+        }
+        if (!readOnlyFaultMessageLocked().isEmpty()) {
+            return failAfterCommittedWrite(
+                    lkg, receipt, verified, "写入返回前只读故障态已变化，");
         }
 
         List<String> notes = new ArrayList<>();
@@ -182,20 +197,99 @@ public final class SafeNotificationRuleWriter {
         }
     }
 
-    private ServiceResult<RuleCreationResult> failAndRollback(
-            RuleLkg lkg, String failurePrefix) {
-        boolean rollbackVerified = rollbackAndVerify(lkg);
-        if (!rollbackVerified) {
+    private ServiceResult<RuleCreationResult> failAfterWriteAttempt(
+            RuleLkg lkg,
+            RuleStoreSnapshot initial,
+            String failurePrefix) {
+        RuleStoreSnapshot observed = readForRecovery();
+        if (observed == null) {
+            return enterReadOnlyFaultLocked(
+                    failurePrefix + "无法验证回滚：写入后状态不可读取，当前规则写入保持只读。");
+        }
+        if (!observed.readOnlyFaultMessage().isEmpty()) {
+            return ServiceResult.failure(observed.readOnlyFaultMessage());
+        }
+        if (observed.storeVersion() != initial.storeVersion()
+                || !matchesRules(initial.rules(), observed.rules())) {
+            return enterReadOnlyFaultLocked(
+                    failurePrefix
+                            + "规则 store 已被外部更新，未覆盖外部规则，当前规则写入保持只读。");
+        }
+        if (!rollbackRulesOnlyAndVerify(lkg, observed)) {
             return enterReadOnlyFaultLocked(
                     failurePrefix + "无法验证回滚，当前规则写入保持只读。");
         }
-        return ServiceResult.failure(failurePrefix + "已从原始 LKG 回滚并验证。");
+        if (!lkg.targetStatesMatch(observed) || !lkg.permissionsMatch(observed)) {
+            return enterReadOnlyFaultLocked(
+                    failurePrefix
+                            + "外部权限或目标状态已变化，已仅回滚规则并保留外部状态，当前规则写入保持只读。");
+        }
+        return ServiceResult.failure(failurePrefix + "已仅回滚本次规则并验证。");
     }
 
-    private boolean rollbackAndVerify(RuleLkg lkg) {
+    private ServiceResult<RuleCreationResult> failAfterCommittedReadFailure(
+            RuleLkg lkg,
+            RuleWriteReceipt receipt,
+            String failurePrefix) {
+        RuleStoreSnapshot observed = readForRecovery();
+        if (observed == null) {
+            return enterReadOnlyFaultLocked(
+                    failurePrefix + "无法验证回滚：写入后状态不可读取，当前规则写入保持只读。");
+        }
+        return failAfterCommittedWrite(
+                lkg, receipt, observed, failurePrefix);
+    }
+
+    private ServiceResult<RuleCreationResult> failAfterCommittedWrite(
+            RuleLkg lkg,
+            RuleWriteReceipt receipt,
+            RuleStoreSnapshot observed,
+            String failurePrefix) {
+        String faultMessage = readOnlyFaultMessageLocked();
+        if (!faultMessage.isEmpty()) {
+            return ServiceResult.failure(faultMessage);
+        }
+        if (!observed.serializedJson().equals(receipt.serializedJson())) {
+            return enterReadOnlyFaultLocked(
+                    failurePrefix
+                            + "写入后规则 store 已发生外部变化，未覆盖外部规则，当前规则写入保持只读。");
+        }
+        boolean externalStateChanged =
+                observed.storeVersion() != receipt.storeVersion()
+                        || !lkg.targetStatesMatch(observed)
+                        || !lkg.permissionsMatch(observed);
+        if (!rollbackRulesOnlyAndVerify(lkg, observed)) {
+            return enterReadOnlyFaultLocked(
+                    failurePrefix + "无法验证回滚，当前规则写入保持只读。");
+        }
+        if (externalStateChanged) {
+            return enterReadOnlyFaultLocked(
+                    failurePrefix
+                            + "外部权限或目标状态已变化，已仅回滚规则并保留外部状态，当前规则写入保持只读。");
+        }
+        return ServiceResult.failure(failurePrefix + "已仅回滚本次规则并验证。");
+    }
+
+    private RuleStoreSnapshot readForRecovery() {
+        ServiceResult<RuleStoreSnapshot> readResult;
+        try {
+            readResult = gateway.read();
+        } catch (RuntimeException exception) {
+            return null;
+        }
+        return readResult.isSuccess() ? readResult.value().orElseThrow() : null;
+    }
+
+    private boolean rollbackRulesOnlyAndVerify(
+            RuleLkg lkg, RuleStoreSnapshot beforeRollback) {
+        RuleLkg preservedState = RuleLkg.capture(beforeRollback);
         ServiceResult<RuleWriteReceipt> rollbackWrite;
         try {
-            rollbackWrite = gateway.restore(lkg);
+            rollbackWrite =
+                    gateway.restoreRules(
+                            lkg,
+                            beforeRollback.storeVersion(),
+                            beforeRollback.rules());
         } catch (RuntimeException exception) {
             return false;
         }
@@ -218,7 +312,10 @@ public final class SafeNotificationRuleWriter {
         }
         RuleStoreSnapshot verified = readBack.value().orElseThrow();
         return !hasUnsafeStructure(verified)
-                && lkg.permissionsMatch(verified)
+                && verified.readOnlyFaultMessage().isEmpty()
+                && readOnlyFaultMessageLocked().isEmpty()
+                && preservedState.targetStatesMatch(verified)
+                && preservedState.permissionsMatch(verified)
                 && verified.serializedJson().equals(lkg.serializedJson())
                 && matchesRules(lkg.rules(), verified.rules())
                 && uniqueRuleIds(verified.rules());

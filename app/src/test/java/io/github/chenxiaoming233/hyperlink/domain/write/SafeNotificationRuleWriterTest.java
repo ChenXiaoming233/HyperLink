@@ -98,6 +98,13 @@ public final class SafeNotificationRuleWriterTest {
         assertEquals(
                 io.github.chenxiaoming233.hyperlink.domain.NotificationAccessState.GRANTED,
                 lkg.notificationAccess());
+        TargetDevice targetA = lkg.targetStates().get("demo-target-a");
+        assertEquals("Demo-PC", targetA.displayName());
+        assertEquals(DeviceType.PC, targetA.type());
+        assertTrue(targetA.online());
+        assertTrue(targetA.reachable());
+        assertTrue(targetA.targetAuthorized());
+        assertTrue(targetA.receiveCapability());
         assertEquals(originalSerialized, lkg.serializedJson());
     }
 
@@ -492,8 +499,9 @@ public final class SafeNotificationRuleWriterTest {
     }
 
     @Test
-    public void targetAuthorizationChangeDuringWriteRollsBackAndVerifiesPermissions() {
+    public void targetAuthorizationChangeDuringWriteRollsBackRulesWithoutOverwritingRevocation() {
         Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        List<NotificationRule> original = new ArrayList<>(fixture.gateway.currentRules());
         ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
         fixture.gateway.changeTargetAuthorizationOnNextWrite("demo-target-a", false);
 
@@ -501,15 +509,16 @@ public final class SafeNotificationRuleWriterTest {
                 fixture.writer.createAllNotificationsRule(selected);
 
         assertFalse(result.isSuccess());
-        assertTrue(result.userMessage().contains("回滚"));
-        assertFalse(fixture.writer.isReadOnlyFault());
+        assertTrue(fixture.writer.isReadOnlyFault());
         assertEquals(2, fixture.gateway.writeCount());
-        assertTrue(targetAuthorized(fixture.gateway.snapshot(), "demo-target-a"));
+        assertFalse(targetAuthorized(fixture.gateway.snapshot(), "demo-target-a"));
+        assertSameRules(original, fixture.gateway.currentRules());
     }
 
     @Test
-    public void notificationAccessChangeDuringWriteRollsBackAndVerifiesPermissions() {
+    public void notificationAccessChangeDuringWriteRollsBackRulesWithoutRestoringAccess() {
         Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        List<NotificationRule> original = new ArrayList<>(fixture.gateway.currentRules());
         ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
         fixture.gateway.changeNotificationAccessOnNextWrite(NotificationAccessState.MISSING);
 
@@ -517,11 +526,74 @@ public final class SafeNotificationRuleWriterTest {
                 fixture.writer.createAllNotificationsRule(selected);
 
         assertFalse(result.isSuccess());
-        assertTrue(result.userMessage().contains("回滚"));
-        assertFalse(fixture.writer.isReadOnlyFault());
+        assertTrue(fixture.writer.isReadOnlyFault());
         assertEquals(
-                NotificationAccessState.GRANTED,
+                NotificationAccessState.MISSING,
                 fixture.gateway.snapshot().flowSnapshot().notificationAccess());
+        assertSameRules(original, fixture.gateway.currentRules());
+    }
+
+    @Test
+    public void authorizationChangeAfterCommitRollsBackRuleWithoutRestoringRevocation() {
+        Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        List<NotificationRule> original = new ArrayList<>(fixture.gateway.currentRules());
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+        fixture.gateway.changeTargetAuthorizationAfterNextWrite("demo-target-a", false);
+
+        ServiceResult<RuleCreationResult> result =
+                fixture.writer.createAllNotificationsRule(selected);
+
+        assertFalse(result.isSuccess());
+        assertTrue(fixture.writer.isReadOnlyFault());
+        assertEquals(2, fixture.gateway.writeCount());
+        assertFalse(targetAuthorized(fixture.gateway.snapshot(), "demo-target-a"));
+        assertSameRules(original, fixture.gateway.currentRules());
+    }
+
+    @Test
+    public void sameVersionExternalRuleChangeAfterCommitIsNotOverwritten() {
+        Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        List<NotificationRule> externalRules =
+                new ArrayList<>(fixture.gateway.currentRules());
+        NotificationRule first = externalRules.get(0);
+        externalRules.set(
+                0,
+                new NotificationRule(
+                        first.ruleId(),
+                        first.sourceDeviceId(),
+                        first.sourceDeviceName(),
+                        first.targetDeviceId(),
+                        first.targetDeviceName(),
+                        first.status(),
+                        "同版本外部更新的演示规则。",
+                        first.dslJson()));
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+        fixture.gateway.replaceRulesAfterNextWrite(externalRules);
+
+        ServiceResult<RuleCreationResult> result =
+                fixture.writer.createAllNotificationsRule(selected);
+
+        assertFalse(result.isSuccess());
+        assertTrue(fixture.writer.isReadOnlyFault());
+        assertSameRules(externalRules, fixture.gateway.currentRules());
+    }
+
+    @Test
+    public void readOnlyFaultAfterRollbackIsNotReportedAsVerified() {
+        Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        List<NotificationRule> original = new ArrayList<>(fixture.gateway.currentRules());
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+        fixture.gateway.changeTargetAuthorizationAfterNextWrite("demo-target-a", false);
+        fixture.gateway.enterReadOnlyFaultAfterNextRestore("演示回滚后持久只读故障。");
+
+        ServiceResult<RuleCreationResult> result =
+                fixture.writer.createAllNotificationsRule(selected);
+
+        assertFalse(result.isSuccess());
+        assertTrue(fixture.writer.isReadOnlyFault());
+        assertTrue(result.userMessage().contains("无法验证回滚"));
+        assertFalse(targetAuthorized(fixture.gateway.snapshot(), "demo-target-a"));
+        assertSameRules(original, fixture.gateway.currentRules());
     }
 
     @Test
@@ -535,7 +607,7 @@ public final class SafeNotificationRuleWriterTest {
 
         assertFalse(result.isSuccess());
         assertTrue(fixture.writer.isReadOnlyFault());
-        assertTrue(result.userMessage().contains("无法验证回滚"));
+        assertTrue(result.userMessage().contains("只读"));
 
         int writesAfterFault = fixture.gateway.writeCount();
         FakeRuleStoreGateway newGateway = new FakeRuleStoreGateway(fixture.gateway.store());
@@ -576,9 +648,9 @@ public final class SafeNotificationRuleWriterTest {
             executor.shutdownNow();
         }
 
-        assertFalse(fixture.writer.isReadOnlyFault());
-        assertEquals(2, fixture.gateway.writeCount());
-        assertTrue(targetAuthorized(fixture.gateway.snapshot(), "demo-target-a"));
+        assertTrue(fixture.writer.isReadOnlyFault());
+        assertEquals(1, fixture.gateway.writeCount());
+        assertFalse(targetAuthorized(fixture.gateway.snapshot(), "demo-target-a"));
     }
 
     @Test
@@ -614,10 +686,11 @@ public final class SafeNotificationRuleWriterTest {
     }
 
     @Test
-    public void unverifiablePermissionRollbackLeavesPersistentReadOnlyFault() {
+    public void unverifiablePermissionSafeRollbackLeavesPersistentReadOnlyFault() {
         Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
         ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
-        fixture.gateway.changeTargetAuthorizationOnEveryWrite("demo-target-a", false);
+        fixture.gateway.changeTargetAuthorizationOnNextWrite("demo-target-a", false);
+        fixture.gateway.throwReadsAfterNextWrite(2);
 
         ServiceResult<RuleCreationResult> result =
                 fixture.writer.createAllNotificationsRule(selected);
@@ -625,6 +698,7 @@ public final class SafeNotificationRuleWriterTest {
         assertFalse(result.isSuccess());
         assertTrue(fixture.writer.isReadOnlyFault());
         assertTrue(result.userMessage().contains("无法验证回滚"));
+        assertFalse(targetAuthorized(fixture.gateway.snapshot(), "demo-target-a"));
 
         int writesAfterFault = fixture.gateway.writeCount();
         FakeRuleStoreGateway newGateway = new FakeRuleStoreGateway(fixture.gateway.store());
@@ -653,7 +727,13 @@ public final class SafeNotificationRuleWriterTest {
         assertTrue(fixture.writer.isReadOnlyFault());
 
         FakeRuleStoreGateway newGateway = new FakeRuleStoreGateway(fixture.gateway.store());
-        assertFalse(newGateway.restore(originalLkg).isSuccess());
+        assertFalse(
+                newGateway
+                        .restoreRules(
+                                originalLkg,
+                                newGateway.snapshot().storeVersion(),
+                                newGateway.currentRules())
+                        .isSuccess());
         int writesAfterRestore = newGateway.writeCount();
         SafeNotificationRuleWriter newWriter =
                 new SafeNotificationRuleWriter(newGateway, new FakeLastKnownGoodStore());
@@ -664,6 +744,197 @@ public final class SafeNotificationRuleWriterTest {
         assertFalse(result.isSuccess());
         assertTrue(newWriter.isReadOnlyFault());
         assertEquals(writesAfterRestore, newGateway.writeCount());
+    }
+
+    @Test
+    public void externalRuleChangeDuringWriteIsNotOverwrittenByStaleCandidate() {
+        Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        RuleStoreSnapshot initial = fixture.gateway.snapshot();
+        List<NotificationRule> initialRules = new ArrayList<>(initial.rules());
+        List<NotificationRule> externalRules = new ArrayList<>(initialRules);
+        NotificationRule first = externalRules.get(0);
+        externalRules.set(
+                0,
+                new NotificationRule(
+                        first.ruleId(),
+                        first.sourceDeviceId(),
+                        first.sourceDeviceName(),
+                        first.targetDeviceId(),
+                        first.targetDeviceName(),
+                        first.status(),
+                        "外部更新的演示规则。",
+                        first.dslJson()));
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+        CountDownLatch writeStarted = new CountDownLatch(1);
+        CountDownLatch commitGate = new CountDownLatch(1);
+        fixture.gateway.signalWriteStarted(writeStarted);
+        fixture.gateway.pauseBeforeNextCommit(commitGate);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<ServiceResult<RuleCreationResult>> future =
+                    executor.submit(
+                            () -> fixture.writer.createAllNotificationsRule(selected));
+            assertTrue(writeStarted.await(5, TimeUnit.SECONDS));
+            FakeRuleStoreGateway externalGateway =
+                    new FakeRuleStoreGateway(fixture.gateway.store());
+            assertTrue(
+                    externalGateway
+                            .write(
+                                    externalRules,
+                                    initial.storeVersion(),
+                                    initialRules)
+                            .isSuccess());
+            commitGate.countDown();
+
+            assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
+        } catch (Exception exception) {
+            throw new AssertionError(exception);
+        } finally {
+            commitGate.countDown();
+            executor.shutdownNow();
+        }
+
+        assertTrue(fixture.writer.isReadOnlyFault());
+        assertSameRules(externalRules, fixture.gateway.currentRules());
+        int writesAfterConflict = fixture.gateway.writeCount();
+        SafeNotificationRuleWriter newWriter =
+                new SafeNotificationRuleWriter(
+                        new FakeRuleStoreGateway(fixture.gateway.store()),
+                        new FakeLastKnownGoodStore());
+        assertFalse(newWriter.createAllNotificationsRule(selected).isSuccess());
+        assertEquals(writesAfterConflict, fixture.gateway.writeCount());
+    }
+
+    @Test
+    public void staleExpectedRulesAreRejectedEvenWhenStoreVersionMatches() {
+        Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        RuleStoreSnapshot initial = fixture.gateway.snapshot();
+        List<NotificationRule> externalRules = new ArrayList<>(initial.rules());
+        NotificationRule first = externalRules.get(0);
+        externalRules.set(
+                0,
+                new NotificationRule(
+                        first.ruleId(),
+                        first.sourceDeviceId(),
+                        first.sourceDeviceName(),
+                        first.targetDeviceId(),
+                        first.targetDeviceName(),
+                        first.status(),
+                        "同版本外部更新的演示规则。",
+                        first.dslJson()));
+        NotificationFlowSnapshot changedFlow =
+                new NotificationFlowSnapshot(
+                        initial.flowSnapshot().connectionState(),
+                        initial.flowSnapshot().stateVersion(),
+                        initial.flowSnapshot().compatibilityUnverified(),
+                        initial.flowSnapshot().targets(),
+                        externalRules,
+                        initial.flowSnapshot().notificationAccess(),
+                        initial.flowSnapshot().staleCache());
+        RuleStoreSnapshot externalSnapshot =
+                new RuleStoreSnapshot(
+                        changedFlow,
+                        initial.sourceDevice(),
+                        initial.capabilities(),
+                        false,
+                        false);
+        assertEquals(initial.storeVersion(), externalSnapshot.storeVersion());
+        fixture.gateway.replaceSnapshot(externalSnapshot);
+
+        ServiceResult<RuleWriteReceipt> result =
+                fixture.gateway.write(
+                        initial.rules(), initial.storeVersion(), initial.rules());
+
+        assertFalse(result.isSuccess());
+        assertSameRules(externalRules, fixture.gateway.currentRules());
+    }
+
+    @Test
+    public void readOnlyFaultPersistenceFailureUsesSharedStoreMemoryGate() {
+        Fixture fixture = fixture("demo-version-tested", "demo-version-tested", true, false);
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+        fixture.gateway.failNextReadOnlyFaultPersistence();
+
+        ServiceResult<RuleCreationResult> result =
+                fixture.writer.createAllNotificationsRule(selected);
+
+        assertFalse(result.isSuccess());
+        assertTrue(result.userMessage().contains("无法持久化故障态"));
+        assertFalse(fixture.gateway.readOnlyFaultMessage().isEmpty());
+        assertEquals(0, fixture.gateway.writeCount());
+
+        FakeRuleStoreGateway newGateway = new FakeRuleStoreGateway(fixture.gateway.store());
+        SafeNotificationRuleWriter newWriter =
+                new SafeNotificationRuleWriter(newGateway, new FakeLastKnownGoodStore());
+        assertFalse(newWriter.createAllNotificationsRule(selected).isSuccess());
+        assertTrue(newWriter.isReadOnlyFault());
+        assertEquals(0, newGateway.writeCount());
+    }
+
+    @Test
+    public void targetStateChangesDuringWriteFailClosedAndPreserveExternalState() {
+        List<TargetDevice> changes =
+                List.of(
+                        new TargetDevice(
+                                "demo-target-a",
+                                "Demo-PC-Renamed",
+                                DeviceType.PC,
+                                true,
+                                true,
+                                true,
+                                true),
+                        new TargetDevice(
+                                "demo-target-a",
+                                "Demo-PC",
+                                DeviceType.PC,
+                                false,
+                                false,
+                                true,
+                                true),
+                        new TargetDevice(
+                                "demo-target-a",
+                                "Demo-PC",
+                                DeviceType.PC,
+                                true,
+                                false,
+                                true,
+                                true),
+                        new TargetDevice(
+                                "demo-target-a",
+                                "Demo-PC",
+                                DeviceType.MAC,
+                                true,
+                                true,
+                                true,
+                                true),
+                        new TargetDevice(
+                                "demo-target-a",
+                                "Demo-PC",
+                                DeviceType.PC,
+                                true,
+                                true,
+                                true,
+                                false));
+
+        for (TargetDevice replacement : changes) {
+            Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+            List<NotificationRule> original = new ArrayList<>(fixture.gateway.currentRules());
+            ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+            fixture.gateway.changeTargetOnNextWrite(replacement);
+
+            ServiceResult<RuleCreationResult> result =
+                    fixture.writer.createAllNotificationsRule(selected);
+
+            assertFalse(result.isSuccess());
+            assertTrue(fixture.writer.isReadOnlyFault());
+            assertSameRules(original, fixture.gateway.currentRules());
+            assertSameTarget(
+                    replacement,
+                    fixture.gateway.snapshot().flowSnapshot().targets().stream()
+                            .filter(target -> target.deviceId().equals("demo-target-a"))
+                            .findFirst()
+                            .orElseThrow());
+        }
     }
 
     @Test
@@ -1025,6 +1296,16 @@ public final class SafeNotificationRuleWriterTest {
         assertEquals(left.status(), right.status());
         assertEquals(left.summary(), right.summary());
         assertEquals(left.dslJson(), right.dslJson());
+    }
+
+    private static void assertSameTarget(TargetDevice expected, TargetDevice actual) {
+        assertEquals(expected.deviceId(), actual.deviceId());
+        assertEquals(expected.displayName(), actual.displayName());
+        assertEquals(expected.type(), actual.type());
+        assertEquals(expected.online(), actual.online());
+        assertEquals(expected.reachable(), actual.reachable());
+        assertEquals(expected.targetAuthorized(), actual.targetAuthorized());
+        assertEquals(expected.receiveCapability(), actual.receiveCapability());
     }
 
     private static final class Fixture {

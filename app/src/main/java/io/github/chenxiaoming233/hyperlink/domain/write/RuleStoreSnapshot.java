@@ -16,6 +16,7 @@ public final class RuleStoreSnapshot {
     private final CapabilityEvidence capabilities;
     private final boolean unknownFieldsPresent;
     private final boolean unexpressibleDslPresent;
+    private final long storeVersion;
     private final String serializedJson;
     private final String readOnlyFaultMessage;
 
@@ -31,6 +32,7 @@ public final class RuleStoreSnapshot {
                 capabilities,
                 unknownFieldsPresent,
                 unexpressibleDslPresent,
+                flowSnapshot.stateVersion(),
                 RuleSerialization.serialize(flowSnapshot.rules()),
                 "");
     }
@@ -41,6 +43,7 @@ public final class RuleStoreSnapshot {
             CapabilityEvidence capabilities,
             boolean unknownFieldsPresent,
             boolean unexpressibleDslPresent,
+            long storeVersion,
             String serializedJson,
             String readOnlyFaultMessage) {
         this.flowSnapshot = Objects.requireNonNull(flowSnapshot, "flowSnapshot");
@@ -48,6 +51,10 @@ public final class RuleStoreSnapshot {
         this.capabilities = Objects.requireNonNull(capabilities, "capabilities");
         this.unknownFieldsPresent = unknownFieldsPresent;
         this.unexpressibleDslPresent = unexpressibleDslPresent;
+        if (storeVersion <= 0) {
+            throw new IllegalArgumentException("storeVersion must be positive");
+        }
+        this.storeVersion = storeVersion;
         this.serializedJson = Objects.requireNonNull(serializedJson, "serializedJson");
         this.readOnlyFaultMessage =
                 Objects.requireNonNull(readOnlyFaultMessage, "readOnlyFaultMessage");
@@ -77,6 +84,10 @@ public final class RuleStoreSnapshot {
         return unexpressibleDslPresent;
     }
 
+    public long storeVersion() {
+        return storeVersion;
+    }
+
     public String serializedJson() {
         return serializedJson;
     }
@@ -100,6 +111,7 @@ public final class RuleStoreSnapshot {
                 capabilities,
                 unknownFieldsPresent,
                 unexpressibleDslPresent,
+                storeVersion + 1L,
                 RuleSerialization.serialize(copy),
                 readOnlyFaultMessage);
     }
@@ -112,6 +124,7 @@ public final class RuleStoreSnapshot {
                 capabilities,
                 nextUnknownFieldsPresent,
                 nextUnexpressibleDslPresent,
+                storeVersion + 1L,
                 serializedJson,
                 readOnlyFaultMessage);
     }
@@ -153,6 +166,43 @@ public final class RuleStoreSnapshot {
                 capabilities,
                 unknownFieldsPresent,
                 unexpressibleDslPresent,
+                storeVersion + 1L,
+                serializedJson,
+                readOnlyFaultMessage);
+    }
+
+    public RuleStoreSnapshot withTarget(TargetDevice replacement) {
+        Objects.requireNonNull(replacement, "replacement");
+        List<TargetDevice> targets = new ArrayList<>(flowSnapshot.targets().size());
+        boolean replaced = false;
+        for (TargetDevice target : flowSnapshot.targets()) {
+            if (target.deviceId().equals(replacement.deviceId())) {
+                targets.add(replacement);
+                replaced = true;
+            } else {
+                targets.add(target);
+            }
+        }
+        if (!replaced) {
+            throw new IllegalArgumentException(
+                    "Unknown target " + replacement.deviceId());
+        }
+        NotificationFlowSnapshot changedFlow =
+                new NotificationFlowSnapshot(
+                        flowSnapshot.connectionState(),
+                        flowSnapshot.stateVersion() + 1L,
+                        flowSnapshot.compatibilityUnverified(),
+                        targets,
+                        flowSnapshot.rules(),
+                        flowSnapshot.notificationAccess(),
+                        flowSnapshot.staleCache());
+        return new RuleStoreSnapshot(
+                changedFlow,
+                sourceDevice,
+                capabilities,
+                unknownFieldsPresent,
+                unexpressibleDslPresent,
+                storeVersion + 1L,
                 serializedJson,
                 readOnlyFaultMessage);
     }
@@ -164,6 +214,7 @@ public final class RuleStoreSnapshot {
                 capabilities,
                 unknownFieldsPresent,
                 unexpressibleDslPresent,
+                storeVersion + 1L,
                 serializedJson,
                 Objects.requireNonNull(message, "message"));
     }

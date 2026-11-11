@@ -7,9 +7,13 @@ import java.util.List;
 public interface RuleStoreGateway {
     ServiceResult<RuleStoreSnapshot> read();
 
-    ServiceResult<RuleWriteReceipt> write(List<NotificationRule> rules);
+    ServiceResult<RuleWriteReceipt> write(
+            List<NotificationRule> rules,
+            long expectedStoreVersion,
+            List<NotificationRule> expectedRules);
 
-    ServiceResult<RuleWriteReceipt> restore(RuleLkg lkg);
+    ServiceResult<RuleWriteReceipt> restoreRules(
+            RuleLkg lkg, long expectedStoreVersion, List<NotificationRule> expectedRules);
 
     String readOnlyFaultMessage();
 

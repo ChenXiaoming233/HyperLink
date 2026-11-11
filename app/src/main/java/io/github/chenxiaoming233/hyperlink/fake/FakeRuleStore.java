@@ -8,6 +8,7 @@ import java.util.Objects;
  */
 public final class FakeRuleStore {
     private RuleStoreSnapshot snapshot;
+    private String memoryReadOnlyFaultMessage = "";
     private int readCount;
     private int writeCount;
 
@@ -28,6 +29,17 @@ public final class FakeRuleStore {
         if (snapshot.readOnlyFaultMessage().isEmpty()) {
             snapshot = snapshot.withReadOnlyFault(message);
         }
+    }
+
+    public synchronized void enterMemoryReadOnlyFault(String message) {
+        if (memoryReadOnlyFaultMessage.isEmpty()) {
+            memoryReadOnlyFaultMessage = Objects.requireNonNull(message, "message");
+        }
+    }
+
+    public synchronized String readOnlyFaultMessage() {
+        String persistent = snapshot.readOnlyFaultMessage();
+        return persistent.isEmpty() ? memoryReadOnlyFaultMessage : persistent;
     }
 
     public synchronized int nextReadCount() {

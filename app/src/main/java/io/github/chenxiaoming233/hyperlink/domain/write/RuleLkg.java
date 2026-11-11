@@ -16,6 +16,7 @@ public final class RuleLkg {
     private final Map<String, String> filtersByRuleId;
     private final Map<String, String> statusesByRuleId;
     private final Map<String, Boolean> targetAuthorizations;
+    private final Map<String, TargetDevice> targetStates;
     private final NotificationAccessState notificationAccess;
     private final String serializedJson;
 
@@ -25,6 +26,7 @@ public final class RuleLkg {
             Map<String, String> filtersByRuleId,
             Map<String, String> statusesByRuleId,
             Map<String, Boolean> targetAuthorizations,
+            Map<String, TargetDevice> targetStates,
             NotificationAccessState notificationAccess,
             String serializedJson) {
         this.rules = immutableList(rules);
@@ -32,6 +34,7 @@ public final class RuleLkg {
         this.filtersByRuleId = immutableMap(filtersByRuleId);
         this.statusesByRuleId = immutableMap(statusesByRuleId);
         this.targetAuthorizations = immutableMap(targetAuthorizations);
+        this.targetStates = immutableMap(targetStates);
         this.notificationAccess =
                 Objects.requireNonNull(notificationAccess, "notificationAccess");
         this.serializedJson = Objects.requireNonNull(serializedJson, "serializedJson");
@@ -48,8 +51,10 @@ public final class RuleLkg {
             statuses.put(rule.ruleId(), rule.status());
         }
         Map<String, Boolean> permissions = new LinkedHashMap<>();
+        Map<String, TargetDevice> targets = new LinkedHashMap<>();
         for (TargetDevice target : snapshot.flowSnapshot().targets()) {
             permissions.put(target.deviceId(), target.targetAuthorized());
+            targets.put(target.deviceId(), target);
         }
         return new RuleLkg(
                 snapshot.flowSnapshot().rules(),
@@ -57,6 +62,7 @@ public final class RuleLkg {
                 filters,
                 statuses,
                 permissions,
+                targets,
                 snapshot.flowSnapshot().notificationAccess(),
                 snapshot.serializedJson());
     }
@@ -81,6 +87,10 @@ public final class RuleLkg {
         return targetAuthorizations;
     }
 
+    public Map<String, TargetDevice> targetStates() {
+        return targetStates;
+    }
+
     public NotificationAccessState notificationAccess() {
         return notificationAccess;
     }
@@ -99,6 +109,30 @@ public final class RuleLkg {
             current.put(target.deviceId(), target.targetAuthorized());
         }
         return targetAuthorizations.equals(current);
+    }
+
+    public boolean targetStatesMatch(RuleStoreSnapshot snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        if (targetStates.size() != snapshot.flowSnapshot().targets().size()) {
+            return false;
+        }
+        for (TargetDevice target : snapshot.flowSnapshot().targets()) {
+            TargetDevice expected = targetStates.get(target.deviceId());
+            if (expected == null || !sameTarget(expected, target)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean sameTarget(TargetDevice expected, TargetDevice actual) {
+        return expected.deviceId().equals(actual.deviceId())
+                && expected.displayName().equals(actual.displayName())
+                && expected.type() == actual.type()
+                && expected.online() == actual.online()
+                && expected.reachable() == actual.reachable()
+                && expected.targetAuthorized() == actual.targetAuthorized()
+                && expected.receiveCapability() == actual.receiveCapability();
     }
 
     private static <T> List<T> immutableList(List<T> values) {

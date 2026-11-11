@@ -1,6 +1,7 @@
 package io.github.chenxiaoming233.hyperlink.fake;
 
 import io.github.chenxiaoming233.hyperlink.domain.NotificationAccessState;
+import io.github.chenxiaoming233.hyperlink.domain.NotificationFlowSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationRule;
 import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
 import io.github.chenxiaoming233.hyperlink.domain.TargetDevice;
@@ -40,6 +41,12 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
     private Boolean everyAuthorizationValue;
     private NotificationAccessState nextNotificationAccess;
     private NotificationAccessState everyNotificationAccess;
+    private TargetDevice nextTargetReplacement;
+    private String afterWriteAuthorizationTargetId;
+    private Boolean afterWriteAuthorizationValue;
+    private List<NotificationRule> rulesAfterNextWrite;
+    private String readOnlyFaultAfterNextRestore;
+    private boolean failNextReadOnlyFaultPersistence;
     private long writeDelayMillis;
     private int activeWrites;
     private int maxActiveWrites;
@@ -75,33 +82,52 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
     }
 
     @Override
-    public ServiceResult<RuleWriteReceipt> write(List<NotificationRule> rules) {
-        return executeWrite(current -> current.withRules(rules));
+    public ServiceResult<RuleWriteReceipt> write(
+            List<NotificationRule> rules,
+            long expectedStoreVersion,
+            List<NotificationRule> expectedRules) {
+        return executeWrite(
+                expectedStoreVersion,
+                expectedRules,
+                current -> current.withRules(rules),
+                false);
     }
 
     @Override
-    public ServiceResult<RuleWriteReceipt> restore(RuleLkg lkg) {
+    public ServiceResult<RuleWriteReceipt> restoreRules(
+            RuleLkg lkg,
+            long expectedStoreVersion,
+            List<NotificationRule> expectedRules) {
         return executeWrite(
+                expectedStoreVersion,
+                expectedRules,
                 current ->
                         current.withRules(lkg.rules())
-                                .withPermissions(
-                                        lkg.targetAuthorizations(),
-                                        lkg.notificationAccess())
-                                .withSafetyFlags(false, false));
+                                .withSafetyFlags(false, false),
+                true);
     }
 
     @Override
     public synchronized String readOnlyFaultMessage() {
-        return store.snapshot().readOnlyFaultMessage();
+        return store.readOnlyFaultMessage();
     }
 
     @Override
     public synchronized void enterReadOnlyFault(String message) {
+        Objects.requireNonNull(message, "message");
+        if (failNextReadOnlyFaultPersistence) {
+            failNextReadOnlyFaultPersistence = false;
+            store.enterMemoryReadOnlyFault(message);
+            throw new IllegalStateException("演示只读故障态持久化失败。");
+        }
         store.enterReadOnlyFault(message);
     }
 
     private ServiceResult<RuleWriteReceipt> executeWrite(
-            UnaryOperator<RuleStoreSnapshot> preparation) {
+            long expectedStoreVersion,
+            List<NotificationRule> expectedRules,
+            UnaryOperator<RuleStoreSnapshot> preparation,
+            boolean restore) {
         beginWrite();
         try {
             signalWriteStarted();
@@ -119,8 +145,13 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
                         return ServiceResult.failure("演示规则写入失败。");
                     }
                     RuleStoreSnapshot current = store.snapshot();
-                    if (!current.readOnlyFaultMessage().isEmpty()) {
+                    if (!store.readOnlyFaultMessage().isEmpty()) {
                         return ServiceResult.failure("演示 store 处于持久只读故障态。");
+                    }
+                    if (current.storeVersion() != expectedStoreVersion
+                            || !sameRules(current.rules(), expectedRules)) {
+                        return ServiceResult.failure(
+                                "演示 store 版本或规则内容已变化，未执行写入。");
                     }
                     if (activateReadFailureAfterWrite) {
                         readsToFail += readsToFailAfterWrite;
@@ -145,11 +176,20 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
                     unknownFieldsOnNextWrite = false;
                     unexpressibleDslOnNextWrite = false;
                     RuleStoreSnapshot stored =
-                            applyPermissionMutations(
-                                    candidate.withSafetyFlags(unknownFields, unexpressibleDsl));
+                            applyTargetMutation(
+                                    applyPermissionMutations(
+                                            candidate.withSafetyFlags(
+                                                    unknownFields, unexpressibleDsl)));
                     store.replaceSnapshot(stored);
-                    return ServiceResult.success(
-                            new RuleWriteReceipt(stored.serializedJson()));
+                    RuleWriteReceipt receipt =
+                            new RuleWriteReceipt(
+                                    stored.serializedJson(), stored.storeVersion());
+                    applyAfterWriteMutations(stored);
+                    if (restore && readOnlyFaultAfterNextRestore != null) {
+                        store.enterReadOnlyFault(readOnlyFaultAfterNextRestore);
+                        readOnlyFaultAfterNextRestore = null;
+                    }
+                    return ServiceResult.success(receipt);
                 }
             }
         } finally {
@@ -204,6 +244,59 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
                         first.summary(),
                         first.dslJson() + " "));
         return candidate.withRules(corrupted);
+    }
+
+    private RuleStoreSnapshot applyTargetMutation(RuleStoreSnapshot candidate) {
+        TargetDevice replacement = nextTargetReplacement;
+        nextTargetReplacement = null;
+        return replacement == null ? candidate : candidate.withTarget(replacement);
+    }
+
+    private void applyAfterWriteMutations(RuleStoreSnapshot stored) {
+        RuleStoreSnapshot current = stored;
+        if (rulesAfterNextWrite != null) {
+            current = withRulesAtCurrentVersion(current, rulesAfterNextWrite);
+            rulesAfterNextWrite = null;
+        }
+        if (afterWriteAuthorizationTargetId != null) {
+            Map<String, Boolean> authorizations = new LinkedHashMap<>();
+            for (TargetDevice target : current.flowSnapshot().targets()) {
+                authorizations.put(
+                        target.deviceId(),
+                        target.deviceId().equals(afterWriteAuthorizationTargetId)
+                                ? afterWriteAuthorizationValue
+                                : target.targetAuthorized());
+            }
+            current =
+                    current.withPermissions(
+                            authorizations,
+                            current.flowSnapshot().notificationAccess());
+            afterWriteAuthorizationTargetId = null;
+            afterWriteAuthorizationValue = null;
+        }
+        if (current != stored) {
+            store.replaceSnapshot(current);
+        }
+    }
+
+    private static RuleStoreSnapshot withRulesAtCurrentVersion(
+            RuleStoreSnapshot snapshot, List<NotificationRule> rules) {
+        NotificationFlowSnapshot flow = snapshot.flowSnapshot();
+        NotificationFlowSnapshot changedFlow =
+                new NotificationFlowSnapshot(
+                        flow.connectionState(),
+                        snapshot.storeVersion(),
+                        flow.compatibilityUnverified(),
+                        flow.targets(),
+                        rules,
+                        flow.notificationAccess(),
+                        flow.staleCache());
+        return new RuleStoreSnapshot(
+                changedFlow,
+                snapshot.sourceDevice(),
+                snapshot.capabilities(),
+                snapshot.unknownFieldsPresent(),
+                snapshot.unexpressibleDslPresent());
     }
 
     private synchronized void beginWrite() {
@@ -311,6 +404,31 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
                 Objects.requireNonNull(notificationAccess, "notificationAccess");
     }
 
+    public synchronized void changeTargetOnNextWrite(TargetDevice replacement) {
+        nextTargetReplacement = Objects.requireNonNull(replacement, "replacement");
+    }
+
+    public synchronized void changeTargetAuthorizationAfterNextWrite(
+            String targetDeviceId, boolean authorized) {
+        afterWriteAuthorizationTargetId =
+                Objects.requireNonNull(targetDeviceId, "targetDeviceId");
+        afterWriteAuthorizationValue = authorized;
+    }
+
+    public synchronized void replaceRulesAfterNextWrite(List<NotificationRule> rules) {
+        rulesAfterNextWrite =
+                Collections.unmodifiableList(
+                        new ArrayList<>(Objects.requireNonNull(rules, "rules")));
+    }
+
+    public synchronized void enterReadOnlyFaultAfterNextRestore(String message) {
+        readOnlyFaultAfterNextRestore = Objects.requireNonNull(message, "message");
+    }
+
+    public synchronized void failNextReadOnlyFaultPersistence() {
+        failNextReadOnlyFaultPersistence = true;
+    }
+
     public synchronized void signalWriteStarted(CountDownLatch latch) {
         writeStartedLatch = Objects.requireNonNull(latch, "latch");
     }
@@ -364,5 +482,27 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    private static boolean sameRules(
+            List<NotificationRule> left, List<NotificationRule> right) {
+        if (left.size() != right.size()) {
+            return false;
+        }
+        for (int index = 0; index < left.size(); index++) {
+            NotificationRule first = left.get(index);
+            NotificationRule second = right.get(index);
+            if (!first.ruleId().equals(second.ruleId())
+                    || !first.sourceDeviceId().equals(second.sourceDeviceId())
+                    || !first.sourceDeviceName().equals(second.sourceDeviceName())
+                    || !first.targetDeviceId().equals(second.targetDeviceId())
+                    || !first.targetDeviceName().equals(second.targetDeviceName())
+                    || !first.status().equals(second.status())
+                    || !first.summary().equals(second.summary())
+                    || !first.dslJson().equals(second.dslJson())) {
+                return false;
+            }
+        }
+        return true;
     }
 }
