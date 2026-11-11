@@ -6,8 +6,8 @@ VoiceAssist Provider 接线或设备级兼容性验收。
 
 ## fake 只读面板
 
-场景展示只调用内存中的 `FakeNotificationFlowService`，不读取 VoiceAssist 规则
-文件、权限 store、Provider 或 `notification-subscriptions.json`。所有 fake 设备名、
+场景展示只调用内存中的 fake store，不读取 VoiceAssist 规则文件、权限 store、
+Provider 或 `notification-subscriptions.json`。所有 fake 设备名、
 设备 ID、来源、规则 ID 和 DSL 示例均为合成占位（如 `Demo-PC`、`demo-target-a`、
 `demo-rule-1`），不包含真实设备关联信息。面板提供正常、过期缓存、空数据、读取失败、
 系统通知使用权缺失和已撤销演示场景，并可切换 fake 活体状态。
@@ -63,13 +63,20 @@ writer 仍会读取该故障态并 fail-closed；显式规则恢复不会自动�
 
 ## fake 结构化规则编辑器
 
-设置页的结构化编辑器使用独立的内存 `FakeRuleStoreGateway`、`FakeLastKnownGoodStore`
-和 `SafeNotificationRuleWriter`。保存按钮只在用户显式点击后调用安全写入链路；页面不会
-自动保存，也不存在真实路径降级、认证绕过或能力探测绕过。所有目标、规则、应用名称和
-包名均为 `Demo-*` / `demo.*` 合成数据，不读取真实已安装应用、图标、VoiceAssist 规则、
-权限 store、Provider 或设备。首次使用未授权目标时必须展示目标名和授权含义，只有用户
-确认后才调用 `confirmAuthorization()`；拒绝会取消保存。离线目标同样要求显式确认，
-不能作为普通成功路径静默继续。
+设置页只创建一份内存 `FakeRuleStoreGateway`/`FakeRuleStore`，并把它同时提供给只读
+场景面板、结构化编辑器和 `RuleLifecycleController`。场景切换通过
+`replaceSnapshot()` 更新同一份共享快照，因此编辑器暂停、恢复或删除后，页面规则列表
+会重新读取同一 store，不会继续显示初始 immutable snapshot。保存按钮只在用户显式点击后
+调用安全写入链路；页面不会自动保存，也不存在真实路径降级、认证绕过或能力探测绕过。
+所有目标、规则、应用名称和包名均为 `Demo-*` / `demo.*` 合成数据，不读取真实已安装应用、
+图标、VoiceAssist 规则、权限 store、Provider 或设备。首次使用未授权目标时必须展示目标名
+和授权含义，只有用户确认后才调用 `confirmAuthorization()`；拒绝会取消保存。离线目标
+同样要求显式确认，不能作为普通成功路径静默继续。
+
+场景读取失败时，共享生命周期编辑器整体隐藏，所有保存、暂停、恢复、删除和撤销入口都会
+短路拒绝，不会保留旧可写快照继续操作；共享 store 恢复可读后才重新显示。`FakeRuleStore`
+已处于持久只读故障时，`replaceSnapshot()` 必须把同一故障继续写入替换后的快照，场景切换、
+新建 gateway 或 Activity 重建都不能清除该故障，后续写入继续 fail-closed。
 
 IM、焦点通知和短信验证码只是临时编辑模板。展开后分别变成 `app in`、`isIsland is true`
 和 `isVerifyCode is true` 条件，多个模板生成同一 AND 组下的多个 OR 规则分支；保存的 DSL
@@ -97,7 +104,9 @@ source+target 规则，writer 会进入持久只读故障态且不执行 upsert�
 `paused`，恢复只改回 `active`；两者都复用原 `ruleId`、筛选 DSL、摘要、目标、创建时间和
 目标授权，并沿用安全写入器的 LKG、串行写入、乐观并发与回读校验，不直接修改 JSON。
 操作成功返回新 UI 模型和 `RuleUndoToken`，编辑器的演示撤销窗口为 10 秒；token 带单调
-序号和到期时间，过期、被新操作替换或已被消费的撤销请求会失败且不写入。
+序号和到期时间，过期、被新操作替换或已被消费的撤销请求会失败且不写入。撤销写入失败时
+不会提前消费 token；stale、授权冲突、目标换绑等冲突恢复后可重试，只有写入成功或确认
+过期才清除 token。
 
 删除必须由 `requestDelete()` 生成一次性确认对象，确认文案明确删除会撤销目标授权；
 取消确认不会调用规则写入或权限 gateway。确认后先从 fake store 删除规则，再通过
@@ -108,7 +117,9 @@ source+target 规则，writer 会进入持久只读故障态且不执行 upsert�
 拒绝变更并显示阻塞错误，不会静默重新授权、写回旧授权或覆盖外部状态。系统通知使用权
 只从 fake 快照检测；`MISSING` / `REVOKED` 时活动规则显示受阻，并提供纯层可测的
 `NotificationAccessSettingsIntentSpec`，只读面板据此打开系统设置页。该入口不调用任何
-授权写入 API。所有规则、目标、设备名和授权均来自 Demo/demo 合成数据。
+授权写入 API。暂停、恢复、删除和撤销还统一要求快照非 stale、连接状态可写、能力探测
+通过、目标授权和系统通知使用权满足；任一条件失败时只显示阻断原因，不执行写入。所有规则、
+目标、设备名和授权均来自 Demo/demo 合成数据。
 
 ## 环境
 
@@ -147,7 +158,9 @@ DSL/状态结构校验、兼容性标记合并、LKG 保存异常、系统通知
 额外覆盖授权允许/拒绝、离线显式确认、notes 全量反馈，以及 A/B 两个分支的 app 条件
 作用域隔离；安全写入测试覆盖重复 source+target 快照 fail-closed。生命周期 fake 测试
 覆盖暂停持久化、恢复复用 `ruleId`、撤销成功与过期、删除确认/取消、目标授权撤销成功与
-失败、外部授权变化阻塞，以及系统通知使用权缺失/撤销和设置 Intent 描述。
+失败、外部授权变化阻塞、撤销失败后 token 保留与冲突恢复重试、持久故障在场景替换和
+新 gateway 中的继承、共享 store 读取失败时编辑器禁写，以及系统通知使用权缺失/撤销和
+设置 Intent 描述。
 
 ## 构建 APK
 

@@ -117,6 +117,89 @@ public final class RuleLifecycleControllerTest {
     }
 
     @Test
+    public void failedUndoKeepsTokenAndRetriesAfterStaleSnapshotRecovers() {
+        Fixture fixture = fixture();
+        RuleUndoToken token =
+                fixture.controller
+                        .pause("demo-rule-1")
+                        .value()
+                        .orElseThrow()
+                        .undoToken()
+                        .orElseThrow();
+        fixture.setStaleCache(true);
+
+        assertFalse(fixture.controller.undo(token).isSuccess());
+        assertUndoTokenRetained(fixture, token);
+
+        fixture.setStaleCache(false);
+        assertTrue(fixture.controller.refresh().value().orElseThrow().canUndo());
+        assertTrue(fixture.controller.undo(token).isSuccess());
+        assertEquals("active", fixture.rule("demo-rule-1").status());
+    }
+
+    @Test
+    public void failedUndoKeepsTokenAndRetriesAfterTargetAuthorizationRecovers() {
+        Fixture fixture = fixture();
+        RuleUndoToken token =
+                fixture.controller
+                        .pause("demo-rule-1")
+                        .value()
+                        .orElseThrow()
+                        .undoToken()
+                        .orElseThrow();
+        fixture.setTargetAuthorization("demo-target-a", false);
+
+        assertFalse(fixture.controller.undo(token).isSuccess());
+        assertUndoTokenRetained(fixture, token);
+
+        fixture.setTargetAuthorization("demo-target-a", true);
+        assertTrue(fixture.controller.refresh().value().orElseThrow().canUndo());
+        assertTrue(fixture.controller.undo(token).isSuccess());
+        assertEquals("active", fixture.rule("demo-rule-1").status());
+    }
+
+    @Test
+    public void failedUndoKeepsTokenAndRetriesAfterRuleTargetIsRestored() {
+        Fixture fixture = fixture();
+        RuleUndoToken token =
+                fixture.controller
+                        .pause("demo-rule-1")
+                        .value()
+                        .orElseThrow()
+                        .undoToken()
+                        .orElseThrow();
+        fixture.changeRuleTarget("demo-rule-1", "demo-target-g");
+
+        assertFalse(fixture.controller.undo(token).isSuccess());
+        assertUndoTokenRetained(fixture, token);
+
+        fixture.changeRuleTarget("demo-rule-1", "demo-target-a");
+        assertTrue(fixture.controller.refresh().value().orElseThrow().canUndo());
+        assertTrue(fixture.controller.undo(token).isSuccess());
+        assertEquals("active", fixture.rule("demo-rule-1").status());
+    }
+
+    @Test
+    public void failedUndoKeepsTokenWhenPersistentReadOnlyFaultBlocksWrites() {
+        Fixture fixture = fixture();
+        RuleUndoToken token =
+                fixture.controller
+                        .pause("demo-rule-1")
+                        .value()
+                        .orElseThrow()
+                        .undoToken()
+                        .orElseThrow();
+        fixture.gateway.enterReadOnlyFault("演示持久只读故障。");
+        int writesBefore = fixture.gateway.writeCount();
+
+        assertFalse(fixture.controller.undo(token).isSuccess());
+        assertUndoTokenRetained(fixture, token);
+        assertFalse(fixture.controller.model().canUndo());
+        assertEquals(writesBefore, fixture.gateway.writeCount());
+        assertEquals("paused", fixture.rule("demo-rule-1").status());
+    }
+
+    @Test
     public void deleteRequiresOneExplicitConfirmationThatExplainsAuthorizationRevocation() {
         Fixture fixture = fixture();
         int writesBefore = fixture.gateway.writeCount();
@@ -224,6 +307,73 @@ public final class RuleLifecycleControllerTest {
         assertEquals(writesBefore, fixture.gateway.writeCount());
         assertTrue(fixture.target("demo-target-a").targetAuthorized());
         assertTrue(fixture.target("demo-target-g").targetAuthorized());
+    }
+
+    @Test
+    public void replaceSnapshotPreservesPersistentFaultAcrossScenarioSwitch() {
+        Fixture fixture = fixture();
+        fixture.gateway.enterReadOnlyFault("演示持久只读故障。");
+        RuleStoreSnapshot current = fixture.gateway.snapshot();
+        NotificationFlowSnapshot flow = current.flowSnapshot();
+        NotificationFlowSnapshot switched =
+                new NotificationFlowSnapshot(
+                        ConnectionState.TARGET_PROCESS_UNREACHABLE,
+                        flow.stateVersion() + 1L,
+                        false,
+                        flow.targets(),
+                        flow.rules(),
+                        NotificationAccessState.REVOKED,
+                        true);
+
+        fixture.gateway.replaceSnapshot(
+                new RuleStoreSnapshot(
+                        switched,
+                        current.sourceDevice(),
+                        current.capabilities(),
+                        current.unknownFieldsPresent(),
+                        current.unexpressibleDslPresent()));
+
+        assertEquals(
+                "演示持久只读故障。",
+                fixture.gateway.snapshot().readOnlyFaultMessage());
+        assertTrue(fixture.gateway.snapshot().flowSnapshot().staleCache());
+        assertEquals(
+                NotificationAccessState.REVOKED,
+                fixture.gateway.snapshot().flowSnapshot().notificationAccess());
+    }
+
+    @Test
+    public void recreatedGatewayInheritsPersistentFaultAndRejectsWrites() {
+        Fixture fixture = fixture();
+        fixture.gateway.enterReadOnlyFault("演示持久只读故障。");
+        FakeRuleStoreGateway recreated = new FakeRuleStoreGateway(fixture.gateway.store());
+        RuleStoreSnapshot current = recreated.snapshot();
+        recreated.replaceSnapshot(
+                new RuleStoreSnapshot(
+                        current.flowSnapshot(),
+                        current.sourceDevice(),
+                        current.capabilities(),
+                        current.unknownFieldsPresent(),
+                        current.unexpressibleDslPresent()));
+        SafeNotificationRuleWriter recreatedWriter =
+                new SafeNotificationRuleWriter(recreated, new FakeLastKnownGoodStore());
+        RuleLifecycleController recreatedController =
+                new RuleLifecycleController(
+                        recreated,
+                        recreatedWriter,
+                        new FakeTargetPermissionGateway(recreated),
+                        () -> 1_000L,
+                        UNDO_WINDOW_MILLIS);
+
+        ServiceResult<RuleLifecycleModel> result =
+                recreatedController.pause("demo-rule-1");
+
+        assertFalse(result.isSuccess());
+        assertEquals(
+                "演示持久只读故障。",
+                recreated.snapshot().readOnlyFaultMessage());
+        assertEquals(0, recreated.writeCount());
+        assertEquals("active", rule(recreated, "demo-rule-1").status());
     }
 
     @Test
@@ -588,6 +738,12 @@ public final class RuleLifecycleControllerTest {
         assertFalse(model.rule("demo-rule-1").orElseThrow().canDelete());
         assertFalse(model.canUndo());
         assertTrue(model.undoToken().isPresent());
+    }
+
+    private static void assertUndoTokenRetained(Fixture fixture, RuleUndoToken token) {
+        assertEquals(
+                token.sequence(),
+                fixture.controller.model().undoToken().orElseThrow().sequence());
     }
 
     private static final class Fixture {

@@ -78,6 +78,7 @@ final class RuleEditorPanel extends LinearLayout {
     private TextView summaryView;
     private TextView statusView;
     private RuleUndoToken undoToken;
+    private boolean writesAvailable = true;
 
     RuleEditorPanel(
             Activity activity,
@@ -688,6 +689,9 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void save() {
+        if (!writesAvailable()) {
+            return;
+        }
         if (!draft.canSave()) {
             setStatus("当前没有可保存的筛选条件；未调用写入。");
             return;
@@ -716,6 +720,9 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void completeSave(RuleSaveGate.SaveDecision decision) {
+        if (!writesAvailable()) {
+            return;
+        }
         if (!decision.shouldSave()) {
             setStatus(decision.message());
             return;
@@ -786,6 +793,14 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     void refreshFromStore() {
+        RuleEditorLoadState loadState = RuleEditorLoadState.from(gateway);
+        if (!loadState.writable()) {
+            writesAvailable = false;
+            setVisibility(GONE);
+            return;
+        }
+        writesAvailable = true;
+        setVisibility(VISIBLE);
         NotificationFlowSnapshot snapshot = gateway.snapshot().flowSnapshot();
         source = sourceFrom(snapshot);
         targets = receivableTargets(snapshot);
@@ -907,18 +922,27 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void pauseRule(String ruleId) {
+        if (!writesAvailable()) {
+            return;
+        }
         completeLifecycleChange(
                 lifecycleController.pause(ruleId),
                 "规则已暂停并持久化为 paused；可在 10 秒内撤销。");
     }
 
     private void resumeRule(String ruleId) {
+        if (!writesAvailable()) {
+            return;
+        }
         completeLifecycleChange(
                 lifecycleController.resume(ruleId),
                 "规则已恢复为 active，并复用原 ruleId；可在 10 秒内撤销。");
     }
 
     private void undoLifecycleChange(RuleUndoToken token) {
+        if (!writesAvailable()) {
+            return;
+        }
         completeLifecycleChange(
                 lifecycleController.undo(token),
                 "已撤销最近一次暂停/恢复操作。");
@@ -940,6 +964,9 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void requestDeleteRule(String ruleId) {
+        if (!writesAvailable()) {
+            return;
+        }
         ServiceResult<DeleteConfirmation> requested =
                 lifecycleController.requestDelete(ruleId);
         if (!requested.isSuccess()) {
@@ -960,6 +987,9 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void completeDelete(DeleteConfirmation confirmation, boolean confirmed) {
+        if (!writesAvailable()) {
+            return;
+        }
         ServiceResult<RuleLifecycleModel> result =
                 lifecycleController.confirmDelete(confirmation, confirmed);
         refreshExistingRules();
@@ -979,6 +1009,13 @@ final class RuleEditorPanel extends LinearLayout {
 
     private void notifyStoreChanged() {
         storeChangedListener.run();
+    }
+
+    private boolean writesAvailable() {
+        if (!writesAvailable) {
+            setStatus("共享 fake store 当前不可读或处于只读故障态，未执行写入。");
+        }
+        return writesAvailable;
     }
 
     private NotificationRule findStoredRule(String ruleId) {

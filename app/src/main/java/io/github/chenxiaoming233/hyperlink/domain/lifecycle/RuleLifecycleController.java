@@ -99,7 +99,6 @@ public final class RuleLifecycleController {
             refreshLocked(true);
             return ServiceResult.failure("撤销时间窗口已过期，未执行任何写入。");
         }
-        lastUndoToken = null;
         ServiceResult<RuleMutationResult> result =
                 writer.changeRuleStatus(
                         token.ruleId(),
@@ -114,6 +113,7 @@ public final class RuleLifecycleController {
                     token.targetDeviceId(),
                     token.targetAuthorized());
         }
+        lastUndoToken = null;
         clearTransientConflict();
         model =
                 RuleLifecycleModel.from(

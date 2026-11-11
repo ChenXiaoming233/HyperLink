@@ -36,6 +36,7 @@ import java.util.Collections;
 import java.util.List;
 
 public final class SettingsActivity extends Activity {
+    private static final String STATE_READ_ONLY_FAULT = "fake_read_only_fault";
     private static final String[] SCENARIOS = {
         "正常演示数据",
         "过期缓存",
@@ -68,11 +69,21 @@ public final class SettingsActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        initializeSharedStore();
+        String inheritedFault =
+                savedInstanceState == null
+                        ? ""
+                        : savedInstanceState.getString(STATE_READ_ONLY_FAULT, "");
+        initializeSharedStore(inheritedFault);
         setContentView(createContent());
     }
 
-    private void initializeSharedStore() {
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putString(STATE_READ_ONLY_FAULT, sharedGateway.readOnlyFaultMessage());
+    }
+
+    private void initializeSharedStore(String inheritedFault) {
         baseSnapshot =
                 FakeNotificationFlowService.demoSnapshot(ConnectionState.CONNECTED);
         SourceDevice source =
@@ -85,6 +96,9 @@ public final class SettingsActivity extends Activity {
                                 CapabilityEvidence.demoComplete(),
                                 false,
                                 false));
+        if (!inheritedFault.isEmpty()) {
+            sharedGateway.enterReadOnlyFault(inheritedFault);
+        }
         sharedWriter =
                 new SafeNotificationRuleWriter(
                         sharedGateway, new FakeLastKnownGoodStore());
@@ -279,12 +293,14 @@ public final class SettingsActivity extends Activity {
 
     private void render() {
         if (scenarioSelector.getSelectedItemPosition() == 3) {
-            PanelDisplayModel failure =
-                    PanelStateMapper.mapFailure(
-                            "演示读取失败，未接触真实 VoiceAssist 数据，请稍后重试。");
-            renderModel(failure, null);
+            sharedGateway.failAllReads();
+            refreshPageFromSharedStore();
+            if (editorPanel != null) {
+                editorPanel.refreshFromStore();
+            }
             return;
         }
+        sharedGateway.clearReadFailures();
         applyScenarioToSharedStore();
         refreshPageFromSharedStore();
         if (editorPanel != null) {

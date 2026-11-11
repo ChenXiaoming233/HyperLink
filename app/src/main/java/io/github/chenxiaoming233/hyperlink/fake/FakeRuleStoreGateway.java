@@ -340,6 +340,15 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
         readsToFail++;
     }
 
+    public synchronized void failAllReads() {
+        failAllReads = true;
+    }
+
+    public synchronized void clearReadFailures() {
+        failAllReads = false;
+        readsToFail = 0;
+    }
+
     public synchronized void failNextWrite() {
         failNextWrite = true;
     }
