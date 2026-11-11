@@ -2,6 +2,8 @@ package io.github.chenxiaoming233.hyperlink.ui;
 
 import android.app.Activity;
 import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
@@ -9,22 +11,36 @@ import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 import io.github.chenxiaoming233.hyperlink.domain.ConnectionState;
+import io.github.chenxiaoming233.hyperlink.domain.NotificationAccessState;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationFlowSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
 import io.github.chenxiaoming233.hyperlink.fake.FakeNotificationFlowService;
 
 public final class SettingsActivity extends Activity {
-    private final FakeNotificationFlowService fakeService =
-            new FakeNotificationFlowService(ConnectionState.NOT_ACTIVATED);
+    private static final String[] SCENARIOS = {
+        "正常演示数据",
+        "过期缓存",
+        "空数据",
+        "读取失败",
+        "系统通知使用权缺失",
+        "系统通知使用权已撤销"
+    };
+
     private TextView stateTitle;
     private TextView stateMessage;
     private TextView compatibilityBadge;
+    private TextView staleCacheBadge;
+    private TextView notificationAccess;
     private TextView stateVersion;
     private Button retryButton;
     private Spinner stateSelector;
+    private Spinner scenarioSelector;
+    private LinearLayout targetContainer;
+    private LinearLayout ruleContainer;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -34,13 +50,22 @@ public final class SettingsActivity extends Activity {
 
     private View createContent() {
         int pagePadding = dp(24);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(Color.rgb(248, 246, 240));
+
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(pagePadding, pagePadding, pagePadding, pagePadding);
         page.setBackgroundColor(Color.rgb(248, 246, 240));
+        scroll.addView(
+                page,
+                new ScrollView.LayoutParams(
+                        ScrollView.LayoutParams.MATCH_PARENT,
+                        ScrollView.LayoutParams.WRAP_CONTENT));
 
         TextView eyebrow = new TextView(this);
-        eyebrow.setText("HYPERLINK / DEMO");
+        eyebrow.setText("HYPERLINK / READ-ONLY DEMO");
         eyebrow.setTextColor(Color.rgb(165, 72, 32));
         eyebrow.setTextSize(12);
         eyebrow.setGravity(Gravity.START);
@@ -55,13 +80,26 @@ public final class SettingsActivity extends Activity {
 
         TextView demoNotice = new TextView(this);
         demoNotice.setText(
-                "演示模式：本页面只读取 fake 服务。未连接 VoiceAssist，"
-                        + "不会接触真实规则、权限或 Provider。");
+                "演示模式：本页面只读取内存 fake gateway。未连接 VoiceAssist，"
+                        + "不会接触真实规则、权限、Provider 或通知订阅文件。"
+                        + "此页面不提供任何写入入口。");
         demoNotice.setTextColor(Color.rgb(75, 82, 78));
         demoNotice.setTextSize(15);
         demoNotice.setPadding(0, 0, 0, dp(20));
         page.addView(demoNotice);
 
+        TextView scenarioLabel = label("演示场景");
+        page.addView(scenarioLabel);
+        scenarioSelector = new Spinner(this);
+        scenarioSelector.setAdapter(
+                new ArrayAdapter<>(
+                        this, android.R.layout.simple_spinner_dropdown_item, SCENARIOS));
+        scenarioSelector.setSelection(0);
+        page.addView(scenarioSelector, matchWrap());
+
+        TextView stateLabel = label("fake 活体状态");
+        stateLabel.setPadding(0, dp(12), 0, 0);
+        page.addView(stateLabel);
         stateSelector = new Spinner(this);
         ArrayAdapter<ConnectionState> adapter =
                 new ArrayAdapter<>(
@@ -69,19 +107,8 @@ public final class SettingsActivity extends Activity {
                         android.R.layout.simple_spinner_dropdown_item,
                         ConnectionState.values());
         stateSelector.setAdapter(adapter);
-        stateSelector.setOnItemSelectedListener(
-                new AdapterView.OnItemSelectedListener() {
-                    @Override
-                    public void onItemSelected(
-                            AdapterView<?> parent, View view, int position, long id) {
-                        render(ConnectionState.values()[position]);
-                    }
-
-                    @Override
-                    public void onNothingSelected(AdapterView<?> parent) {}
-                });
-        page.addView(stateSelector, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        stateSelector.setSelection(ConnectionState.CONNECTED.ordinal());
+        page.addView(stateSelector, matchWrap());
 
         compatibilityBadge = new TextView(this);
         compatibilityBadge.setText("兼容性未经完整验收");
@@ -94,7 +121,21 @@ public final class SettingsActivity extends Activity {
                         LinearLayout.LayoutParams.WRAP_CONTENT,
                         LinearLayout.LayoutParams.WRAP_CONTENT);
         badgeParams.topMargin = dp(18);
+        badgeParams.rightMargin = dp(8);
         page.addView(compatibilityBadge, badgeParams);
+
+        staleCacheBadge = new TextView(this);
+        staleCacheBadge.setText("缓存快照已过期");
+        staleCacheBadge.setTextColor(Color.rgb(126, 48, 30));
+        staleCacheBadge.setTextSize(13);
+        staleCacheBadge.setPadding(dp(10), dp(6), dp(10), dp(6));
+        staleCacheBadge.setBackgroundColor(Color.rgb(255, 220, 204));
+        LinearLayout.LayoutParams staleParams =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        staleParams.topMargin = dp(18);
+        page.addView(staleCacheBadge, staleParams);
 
         stateTitle = new TextView(this);
         stateTitle.setTextColor(Color.rgb(30, 38, 36));
@@ -115,40 +156,274 @@ public final class SettingsActivity extends Activity {
         page.addView(stateVersion);
 
         retryButton = new Button(this);
-        retryButton.setText("重新读取演示状态");
-        retryButton.setOnClickListener(view -> render(selectedState()));
+        retryButton.setText("重新读取 fake 快照");
         page.addView(retryButton);
 
-        return page;
+        TextView accessHeading = sectionHeading("系统通知使用权");
+        accessHeading.setPadding(0, dp(28), 0, dp(6));
+        page.addView(accessHeading);
+        notificationAccess = new TextView(this);
+        notificationAccess.setTextSize(15);
+        notificationAccess.setLineSpacing(0f, 1.2f);
+        notificationAccess.setPadding(0, 0, 0, dp(8));
+        page.addView(notificationAccess);
+
+        TextView targetHeading = sectionHeading("目标设备");
+        targetHeading.setPadding(0, dp(28), 0, dp(4));
+        page.addView(targetHeading);
+        TextView targetCaption = caption("仅显示具备接收能力的 PC、PAD 与 MAC；手机等其他类型已过滤。");
+        page.addView(targetCaption);
+        targetContainer = new LinearLayout(this);
+        targetContainer.setOrientation(LinearLayout.VERTICAL);
+        page.addView(targetContainer, matchWrap());
+
+        TextView ruleHeading = sectionHeading("规则（保持上行顺序）");
+        ruleHeading.setPadding(0, dp(28), 0, dp(4));
+        page.addView(ruleHeading);
+        TextView ruleCaption =
+                caption("完整展示 ruleId、来源、目标、状态、规则摘要和 DSL；不做字段裁剪或规则重排。");
+        page.addView(ruleCaption);
+        ruleContainer = new LinearLayout(this);
+        ruleContainer.setOrientation(LinearLayout.VERTICAL);
+        page.addView(ruleContainer, matchWrap());
+
+        TextView footer = caption(
+                "只读边界：fake gateway 不包含写入、真实路径降级、认证绕过或能力探测绕过。"
+                        + "“已启用”不代表通知已经送达。");
+        footer.setPadding(0, dp(28), 0, dp(8));
+        page.addView(footer);
+
+        AdapterView.OnItemSelectedListener listener =
+                new AdapterView.OnItemSelectedListener() {
+                    @Override
+                    public void onItemSelected(
+                            AdapterView<?> parent, View view, int position, long id) {
+                        render();
+                    }
+
+                    @Override
+                    public void onNothingSelected(AdapterView<?> parent) {}
+                };
+        scenarioSelector.setOnItemSelectedListener(listener);
+        stateSelector.setOnItemSelectedListener(listener);
+        retryButton.setOnClickListener(view -> render());
+        render();
+        return scroll;
     }
 
-    private void render(ConnectionState state) {
-        fakeService.setConnectionState(state);
-        ServiceResult<NotificationFlowSnapshot> result = fakeService.readSnapshot();
+    private void render() {
+        FakeNotificationFlowService service = createFakeService();
+        ServiceResult<NotificationFlowSnapshot> result = service.readSnapshot();
         if (!result.isSuccess()) {
             PanelDisplayModel failure = PanelStateMapper.mapFailure(result.userMessage());
-            stateTitle.setText(failure.title());
-            stateMessage.setText(failure.message());
-            compatibilityBadge.setVisibility(View.GONE);
-            stateVersion.setText("状态版本：未知");
-            retryButton.setEnabled(failure.retryEnabled());
+            renderModel(failure, null);
             return;
         }
 
         NotificationFlowSnapshot snapshot = result.value().get();
-        PanelDisplayModel model =
-                PanelStateMapper.map(snapshot.connectionState(), snapshot.compatibilityUnverified());
+        renderModel(PanelStateMapper.map(snapshot), snapshot);
+    }
 
+    private FakeNotificationFlowService createFakeService() {
+        ConnectionState state = selectedState();
+        switch (scenarioSelector.getSelectedItemPosition()) {
+            case 1:
+                return new FakeNotificationFlowService(
+                        FakeNotificationFlowService.staleDemoSnapshot(state));
+            case 2:
+                return new FakeNotificationFlowService(
+                        FakeNotificationFlowService.emptySnapshot(state));
+            case 3:
+                return FakeNotificationFlowService.failing(
+                        "演示读取失败，未接触真实 VoiceAssist 数据，请稍后重试。");
+            case 4:
+                return new FakeNotificationFlowService(
+                        FakeNotificationFlowService.demoSnapshot(state)
+                                .withNotificationAccess(NotificationAccessState.MISSING));
+            case 5:
+                return new FakeNotificationFlowService(
+                        FakeNotificationFlowService.demoSnapshot(state)
+                                .withNotificationAccess(NotificationAccessState.REVOKED));
+            default:
+                return new FakeNotificationFlowService(
+                        FakeNotificationFlowService.demoSnapshot(state));
+        }
+    }
+
+    private void renderModel(PanelDisplayModel model, NotificationFlowSnapshot snapshot) {
         stateTitle.setText(model.title());
         stateMessage.setText(model.message());
         compatibilityBadge.setVisibility(
                 model.compatibilityBadgeVisible() ? View.VISIBLE : View.GONE);
-        stateVersion.setText("状态版本：" + snapshot.stateVersion());
+        staleCacheBadge.setVisibility(model.staleCacheVisible() ? View.VISIBLE : View.GONE);
+        notificationAccess.setText(model.notificationAccessText());
+        notificationAccess.setTextColor(
+                model.notificationAccessBlocked()
+                        ? Color.rgb(156, 50, 35)
+                        : Color.rgb(45, 91, 62));
+        stateVersion.setText(
+                snapshot == null
+                        ? "状态版本：未知 · 只读"
+                        : "状态版本：" + snapshot.stateVersion() + " · 只读");
         retryButton.setEnabled(model.retryEnabled());
+
+        targetContainer.removeAllViews();
+        for (PanelDisplayModel.TargetItem target : model.targets()) {
+            targetContainer.addView(createTargetCard(target));
+        }
+        if (model.targets().isEmpty()) {
+            targetContainer.addView(emptySectionText(model.targetSectionPlaceholder()));
+        }
+
+        ruleContainer.removeAllViews();
+        for (PanelDisplayModel.RuleItem rule : model.rules()) {
+            ruleContainer.addView(createRuleCard(rule));
+        }
+        if (model.rules().isEmpty()) {
+            ruleContainer.addView(emptySectionText(model.ruleSectionPlaceholder()));
+        }
+    }
+
+    private View createTargetCard(PanelDisplayModel.TargetItem target) {
+        LinearLayout card = card();
+        TextView heading = new TextView(this);
+        heading.setText(target.displayName() + "  /  " + target.typeLabel());
+        heading.setTextColor(Color.rgb(30, 38, 36));
+        heading.setTextSize(19);
+        heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        card.addView(heading);
+
+        TextView states = bodyText(
+                "在线：" + target.onlineLabel()
+                        + "    可达：" + target.reachableLabel()
+                        + "\n" + target.authorizationLabel()
+                        + "    " + target.receiveCapabilityLabel());
+        states.setPadding(0, dp(8), 0, 0);
+        card.addView(states);
+
+        TextView id = caption(target.deviceId());
+        id.setPadding(0, dp(6), 0, 0);
+        card.addView(id);
+        if (!target.notice().isEmpty()) {
+            card.addView(noticeText(target.notice()));
+        }
+        return card;
+    }
+
+    private View createRuleCard(PanelDisplayModel.RuleItem rule) {
+        LinearLayout card = card();
+        TextView heading = new TextView(this);
+        heading.setText("#" + rule.position() + "  " + rule.ruleId());
+        heading.setTextColor(Color.rgb(30, 38, 36));
+        heading.setTextSize(19);
+        heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        card.addView(heading);
+
+        TextView status = bodyText("状态：" + rule.statusLabel() + "（原始值：" + rule.storedStatus() + "）");
+        status.setPadding(0, dp(8), 0, 0);
+        card.addView(status);
+
+        TextView endpoints = bodyText(
+                "来源：" + rule.sourceDeviceName() + "\n" + rule.sourceDeviceId()
+                        + "\n目标：" + rule.targetDeviceName() + "\n" + rule.targetDeviceId());
+        endpoints.setPadding(0, dp(8), 0, 0);
+        card.addView(endpoints);
+
+        TextView summary = bodyText("规则摘要：" + rule.summary());
+        summary.setPadding(0, dp(10), 0, 0);
+        card.addView(summary);
+
+        TextView dslLabel = caption("完整 DSL");
+        dslLabel.setPadding(0, dp(14), 0, 0);
+        card.addView(dslLabel);
+
+        TextView dsl = bodyText(rule.dslJson());
+        dsl.setTypeface(Typeface.MONOSPACE);
+        dsl.setTextIsSelectable(true);
+        dsl.setBackgroundColor(Color.rgb(245, 242, 234));
+        dsl.setPadding(dp(10), dp(10), dp(10), dp(10));
+        LinearLayout.LayoutParams dslParams = matchWrap();
+        dslParams.topMargin = dp(6);
+        card.addView(dsl, dslParams);
+
+        if (!rule.notice().isEmpty()) {
+            card.addView(noticeText(rule.notice()));
+        }
+        return card;
     }
 
     private ConnectionState selectedState() {
         return ConnectionState.values()[stateSelector.getSelectedItemPosition()];
+    }
+
+    private LinearLayout card() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(14), dp(16), dp(14));
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(Color.rgb(255, 253, 247));
+        background.setCornerRadius(dp(12));
+        background.setStroke(dp(1), Color.rgb(224, 218, 204));
+        card.setBackground(background);
+        LinearLayout.LayoutParams params = matchWrap();
+        params.topMargin = dp(10);
+        card.setLayoutParams(params);
+        return card;
+    }
+
+    private TextView label(String text) {
+        TextView label = new TextView(this);
+        label.setText(text);
+        label.setTextColor(Color.rgb(111, 119, 114));
+        label.setTextSize(12);
+        return label;
+    }
+
+    private TextView sectionHeading(String text) {
+        TextView heading = new TextView(this);
+        heading.setText(text);
+        heading.setTextColor(Color.rgb(30, 38, 36));
+        heading.setTextSize(21);
+        heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        return heading;
+    }
+
+    private TextView caption(String text) {
+        TextView caption = new TextView(this);
+        caption.setText(text);
+        caption.setTextColor(Color.rgb(111, 119, 114));
+        caption.setTextSize(13);
+        caption.setLineSpacing(0f, 1.15f);
+        return caption;
+    }
+
+    private TextView bodyText(String text) {
+        TextView body = new TextView(this);
+        body.setText(text);
+        body.setTextColor(Color.rgb(50, 58, 54));
+        body.setTextSize(15);
+        body.setLineSpacing(0f, 1.2f);
+        return body;
+    }
+
+    private TextView noticeText(String text) {
+        TextView notice = bodyText(text);
+        notice.setTextColor(Color.rgb(156, 50, 35));
+        notice.setPadding(0, dp(10), 0, 0);
+        return notice;
+    }
+
+    private TextView emptySectionText(String text) {
+        TextView empty = bodyText(text);
+        empty.setTextColor(Color.rgb(111, 119, 114));
+        empty.setPadding(0, dp(10), 0, dp(4));
+        return empty;
+    }
+
+    private LinearLayout.LayoutParams matchWrap() {
+        return new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
     }
 
     private int dp(int value) {

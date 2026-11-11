@@ -16,6 +16,9 @@ public final class ServiceResult<T> {
         return new ServiceResult<>(Objects.requireNonNull(value, "value"), "");
     }
 
+    /**
+     * Creates a failure using caller-sanitized UI copy, never a raw exception message.
+     */
     public static <T> ServiceResult<T> failure(String userMessage) {
         return new ServiceResult<>(null, userMessage);
     }
@@ -28,6 +31,9 @@ public final class ServiceResult<T> {
         return Optional.ofNullable(value);
     }
 
+    /**
+     * Returns UI-safe copy supplied by the service boundary.
+     */
     public String userMessage() {
         return userMessage;
     }

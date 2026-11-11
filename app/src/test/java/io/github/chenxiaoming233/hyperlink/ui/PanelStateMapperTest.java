@@ -6,13 +6,15 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import io.github.chenxiaoming233.hyperlink.domain.ConnectionState;
+import io.github.chenxiaoming233.hyperlink.fake.FakeNotificationFlowService;
 import org.junit.Test;
 
 public final class PanelStateMapperTest {
     @Test
     public void mapsEveryConnectionStateToSafeUserCopy() {
         for (ConnectionState state : ConnectionState.values()) {
-            PanelDisplayModel model = PanelStateMapper.map(state, true);
+            PanelDisplayModel model =
+                    PanelStateMapper.map(FakeNotificationFlowService.emptySnapshot(state));
 
             assertNotNull(state.name(), model.title());
             assertNotNull(state.name(), model.message());
@@ -22,25 +24,33 @@ public final class PanelStateMapperTest {
     }
 
     @Test
-    public void capabilityFailureDisablesManagementAndEnablesRetry() {
+    public void capabilityFailureKeepsPanelReadOnlyAndEnablesRetry() {
         PanelDisplayModel model =
-                PanelStateMapper.map(ConnectionState.CAPABILITY_INSUFFICIENT, false);
+                PanelStateMapper.map(
+                        FakeNotificationFlowService.emptySnapshot(
+                                ConnectionState.CAPABILITY_INSUFFICIENT));
 
-        assertFalse(model.managementEnabled());
+        assertTrue(model.readOnly());
         assertTrue(model.retryEnabled());
     }
 
     @Test
-    public void connectedStateEnablesManagement() {
-        PanelDisplayModel model = PanelStateMapper.map(ConnectionState.CONNECTED, false);
+    public void connectedStateIsReadOnlyWithoutRetry() {
+        PanelDisplayModel model =
+                PanelStateMapper.map(
+                        FakeNotificationFlowService.emptySnapshot(ConnectionState.CONNECTED));
 
-        assertTrue(model.managementEnabled());
+        assertTrue(model.readOnly());
+        assertFalse(model.retryEnabled());
         assertFalse(model.compatibilityBadgeVisible());
     }
 
     @Test
     public void unknownCompatibilityIsAlwaysVisible() {
-        PanelDisplayModel model = PanelStateMapper.map(ConnectionState.CONNECTED, true);
+        PanelDisplayModel model =
+                PanelStateMapper.map(
+                        FakeNotificationFlowService.emptySnapshot(
+                                ConnectionState.COMPATIBILITY_UNVERIFIED));
 
         assertTrue(model.compatibilityBadgeVisible());
     }
@@ -51,7 +61,7 @@ public final class PanelStateMapperTest {
 
         assertEquals("读取失败", model.title());
         assertEquals("服务暂时不可用。", model.message());
-        assertFalse(model.managementEnabled());
+        assertTrue(model.readOnly());
         assertTrue(model.retryEnabled());
         assertFalse(model.compatibilityBadgeVisible());
     }
