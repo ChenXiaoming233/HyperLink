@@ -11,6 +11,7 @@ public final class NotificationRule {
     private final String status;
     private final String summary;
     private final String dslJson;
+    private final long createdAt;
 
     public NotificationRule(
             String ruleId,
@@ -21,6 +22,28 @@ public final class NotificationRule {
             String status,
             String summary,
             String dslJson) {
+        this(
+                ruleId,
+                sourceDeviceId,
+                sourceDeviceName,
+                targetDeviceId,
+                targetDeviceName,
+                status,
+                summary,
+                dslJson,
+                0L);
+    }
+
+    public NotificationRule(
+            String ruleId,
+            String sourceDeviceId,
+            String sourceDeviceName,
+            String targetDeviceId,
+            String targetDeviceName,
+            String status,
+            String summary,
+            String dslJson,
+            long createdAt) {
         this.ruleId = requireText(ruleId, "ruleId");
         this.sourceDeviceId = requireText(sourceDeviceId, "sourceDeviceId");
         this.sourceDeviceName = requireText(sourceDeviceName, "sourceDeviceName");
@@ -29,6 +52,10 @@ public final class NotificationRule {
         this.status = requireText(status, "status");
         this.summary = Objects.requireNonNull(summary, "summary");
         this.dslJson = Objects.requireNonNull(dslJson, "dslJson");
+        if (createdAt < 0L) {
+            throw new IllegalArgumentException("createdAt must not be negative");
+        }
+        this.createdAt = createdAt;
     }
 
     public String ruleId() {
@@ -61,6 +88,10 @@ public final class NotificationRule {
 
     public String dslJson() {
         return dslJson;
+    }
+
+    public long createdAt() {
+        return createdAt;
     }
 
     private static String requireText(String value, String name) {

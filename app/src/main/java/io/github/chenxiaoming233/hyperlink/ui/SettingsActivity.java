@@ -65,7 +65,7 @@ public final class SettingsActivity extends Activity {
                         ScrollView.LayoutParams.WRAP_CONTENT));
 
         TextView eyebrow = new TextView(this);
-        eyebrow.setText("HYPERLINK / READ-ONLY DEMO");
+        eyebrow.setText("HYPERLINK / FAKE DEMO + EDITOR");
         eyebrow.setTextColor(Color.rgb(165, 72, 32));
         eyebrow.setTextSize(12);
         eyebrow.setGravity(Gravity.START);
@@ -80,9 +80,9 @@ public final class SettingsActivity extends Activity {
 
         TextView demoNotice = new TextView(this);
         demoNotice.setText(
-                "演示模式：本页面只读取内存 fake gateway。未连接 VoiceAssist，"
+                "演示模式：场景快照只读取内存 fake gateway。未连接 VoiceAssist，"
                         + "不会接触真实规则、权限、Provider 或通知订阅文件。"
-                        + "此页面不提供任何写入入口。");
+                        + "下方结构化编辑器可显式写入独立内存 fake store，绝不降级到真实路径。");
         demoNotice.setTextColor(Color.rgb(75, 82, 78));
         demoNotice.setTextSize(15);
         demoNotice.setPadding(0, 0, 0, dp(20));
@@ -168,6 +168,11 @@ public final class SettingsActivity extends Activity {
         notificationAccess.setPadding(0, 0, 0, dp(8));
         page.addView(notificationAccess);
 
+        RuleEditorPanel ruleEditorPanel = new RuleEditorPanel(this);
+        LinearLayout.LayoutParams editorParams = matchWrap();
+        editorParams.topMargin = dp(28);
+        page.addView(ruleEditorPanel, editorParams);
+
         TextView targetHeading = sectionHeading("目标设备");
         targetHeading.setPadding(0, dp(28), 0, dp(4));
         page.addView(targetHeading);
@@ -177,7 +182,7 @@ public final class SettingsActivity extends Activity {
         targetContainer.setOrientation(LinearLayout.VERTICAL);
         page.addView(targetContainer, matchWrap());
 
-        TextView ruleHeading = sectionHeading("规则（保持上行顺序）");
+        TextView ruleHeading = sectionHeading("场景快照规则（保持上行顺序）");
         ruleHeading.setPadding(0, dp(28), 0, dp(4));
         page.addView(ruleHeading);
         TextView ruleCaption =
@@ -188,7 +193,8 @@ public final class SettingsActivity extends Activity {
         page.addView(ruleContainer, matchWrap());
 
         TextView footer = caption(
-                "只读边界：fake gateway 不包含写入、真实路径降级、认证绕过或能力探测绕过。"
+                "边界：场景展示只读；结构化编辑器只显式写入独立 fake store，"
+                        + "不存在真实路径降级、认证绕过或能力探测绕过。"
                         + "“已启用”不代表通知已经送达。");
         footer.setPadding(0, dp(28), 0, dp(8));
         page.addView(footer);

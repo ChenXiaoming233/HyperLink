@@ -16,7 +16,7 @@ final class RuleDslValidator {
             setOf("field", "op", "value");
     private static final Set<String> KNOWN_FIELDS =
             setOf("app", "isIsland", "isVerifyCode");
-    private static final Set<String> KNOWN_OPERATORS = setOf("in", "is");
+    private static final Set<String> KNOWN_OPERATORS = setOf("in", "not_in", "is");
 
     private RuleDslValidator() {}
 
@@ -27,6 +27,10 @@ final class RuleDslValidator {
         } catch (IllegalArgumentException exception) {
             return false;
         }
+    }
+
+    static Object parse(String dslJson) {
+        return new Parser(dslJson).parse();
     }
 
     private static boolean validRoot(Map<String, Object> root) {
@@ -104,7 +108,8 @@ final class RuleDslValidator {
             return false;
         }
         if ("app".equals(field)) {
-            return "in".equals(operator) && validAppList((String) value);
+            return ("in".equals(operator) || "not_in".equals(operator))
+                    && validAppList((String) value);
         }
         return "is".equals(operator)
                 && ("true".equals(value) || "false".equals(value));

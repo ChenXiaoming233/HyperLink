@@ -27,7 +27,8 @@ final class RuleSerialization {
             appendString(json, rule.status());
             json.append(",\"summary\":");
             appendString(json, rule.summary());
-            json.append(",\"dsl\":").append(rule.dslJson()).append('}');
+            json.append(",\"dsl\":").append(rule.dslJson());
+            json.append(",\"createdAt\":").append(rule.createdAt()).append('}');
         }
         return json.append("]}").toString();
     }
