@@ -1,1 +1,7 @@
 backups/
+.gradle/
+**/build/
+local.properties
+*.iml
+.idea/
+hs_err_pid*.log
