@@ -8,4 +8,10 @@ public interface RuleStoreGateway {
     ServiceResult<RuleStoreSnapshot> read();
 
     ServiceResult<RuleWriteReceipt> write(List<NotificationRule> rules);
+
+    ServiceResult<RuleWriteReceipt> restore(RuleLkg lkg);
+
+    String readOnlyFaultMessage();
+
+    void enterReadOnlyFault(String message);
 }

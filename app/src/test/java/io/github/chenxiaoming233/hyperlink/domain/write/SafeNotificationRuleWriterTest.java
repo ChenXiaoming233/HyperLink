@@ -6,6 +6,7 @@ import static org.junit.Assert.assertTrue;
 
 import io.github.chenxiaoming233.hyperlink.domain.ConnectionState;
 import io.github.chenxiaoming233.hyperlink.domain.DeviceType;
+import io.github.chenxiaoming233.hyperlink.domain.NotificationAccessState;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationFlowSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationRule;
 import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
@@ -14,8 +15,11 @@ import io.github.chenxiaoming233.hyperlink.fake.FakeLastKnownGoodStore;
 import io.github.chenxiaoming233.hyperlink.fake.FakeNotificationFlowService;
 import io.github.chenxiaoming233.hyperlink.fake.FakeRuleStoreGateway;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -185,6 +189,77 @@ public final class SafeNotificationRuleWriterTest {
     }
 
     @Test
+    public void actualUnknownDslFieldsAreRejectedEvenWhenGatewayFlagsAreFalse() {
+        List<String> invalidDsl =
+                List.of(
+                        """
+                        {"ruleText":"演示规则","unknownField":true}
+                        """,
+                        """
+                        {"andGroups":[{"branches":[[{"field":"app","op":"contains","value":"demo.app"}]}]],"ruleText":"演示规则"}
+                        """,
+                        """
+                        {"andGroups":[{"branches":[[{"field":"unknownField","op":"is","value":"true"}]]}],"ruleText":"演示规则"}
+                        """,
+                        """
+                        {"andGroups":[{"branches":"not-an-array"}],"ruleText":"演示规则"}
+                        """);
+
+        for (String dsl : invalidDsl) {
+            Fixture fixture = fixture(snapshotWithRule(demoFlow(), "active", dsl));
+            ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+
+            ServiceResult<RuleCreationResult> result =
+                    fixture.writer.createAllNotificationsRule(selected);
+
+            assertFalse(result.isSuccess());
+            assertEquals(0, fixture.gateway.writeCount());
+            assertTrue(fixture.writer.isReadOnlyFault());
+        }
+    }
+
+    @Test
+    public void unknownStoredStatusIsRejectedEvenWhenGatewayFlagsAreFalse() {
+        Fixture fixture =
+                fixture(
+                        snapshotWithRule(
+                                demoFlow(),
+                                "blocked",
+                                "{\"ruleText\":\"演示规则\"}"));
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+
+        ServiceResult<RuleCreationResult> result =
+                fixture.writer.createAllNotificationsRule(selected);
+
+        assertFalse(result.isSuccess());
+        assertEquals(0, fixture.gateway.writeCount());
+        assertTrue(fixture.writer.isReadOnlyFault());
+    }
+
+    @Test
+    public void deeplyNestedDslFailsClosedWithoutEscapingAsError() {
+        StringBuilder dsl = new StringBuilder("{\"andGroups\":");
+        for (int index = 0; index < 20_000; index++) {
+            dsl.append('[');
+        }
+        dsl.append('0');
+        for (int index = 0; index < 20_000; index++) {
+            dsl.append(']');
+        }
+        dsl.append(",\"ruleText\":\"演示规则\"}");
+        Fixture fixture =
+                fixture(snapshotWithRule(demoFlow(), "active", dsl.toString()));
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+
+        ServiceResult<RuleCreationResult> result =
+                fixture.writer.createAllNotificationsRule(selected);
+
+        assertFalse(result.isSuccess());
+        assertEquals(0, fixture.gateway.writeCount());
+        assertTrue(fixture.writer.isReadOnlyFault());
+    }
+
+    @Test
     public void cannotCreateWhenCapabilityProbeFails() {
         CapabilityEvidence incomplete =
                 CapabilityEvidence.demoComplete()
@@ -226,6 +301,20 @@ public final class SafeNotificationRuleWriterTest {
         Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
         ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
         fixture.lkgStore.failNextSave();
+
+        ServiceResult<RuleCreationResult> result =
+                fixture.writer.createAllNotificationsRule(selected);
+
+        assertFalse(result.isSuccess());
+        assertEquals(0, fixture.gateway.writeCount());
+        assertTrue(result.userMessage().contains("LKG"));
+    }
+
+    @Test
+    public void lkgSaveExceptionStopsBeforeWrite() {
+        Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+        fixture.lkgStore.failNextSaveWithException();
 
         ServiceResult<RuleCreationResult> result =
                 fixture.writer.createAllNotificationsRule(selected);
@@ -403,6 +492,230 @@ public final class SafeNotificationRuleWriterTest {
     }
 
     @Test
+    public void targetAuthorizationChangeDuringWriteRollsBackAndVerifiesPermissions() {
+        Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+        fixture.gateway.changeTargetAuthorizationOnNextWrite("demo-target-a", false);
+
+        ServiceResult<RuleCreationResult> result =
+                fixture.writer.createAllNotificationsRule(selected);
+
+        assertFalse(result.isSuccess());
+        assertTrue(result.userMessage().contains("回滚"));
+        assertFalse(fixture.writer.isReadOnlyFault());
+        assertEquals(2, fixture.gateway.writeCount());
+        assertTrue(targetAuthorized(fixture.gateway.snapshot(), "demo-target-a"));
+    }
+
+    @Test
+    public void notificationAccessChangeDuringWriteRollsBackAndVerifiesPermissions() {
+        Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+        fixture.gateway.changeNotificationAccessOnNextWrite(NotificationAccessState.MISSING);
+
+        ServiceResult<RuleCreationResult> result =
+                fixture.writer.createAllNotificationsRule(selected);
+
+        assertFalse(result.isSuccess());
+        assertTrue(result.userMessage().contains("回滚"));
+        assertFalse(fixture.writer.isReadOnlyFault());
+        assertEquals(
+                NotificationAccessState.GRANTED,
+                fixture.gateway.snapshot().flowSnapshot().notificationAccess());
+    }
+
+    @Test
+    public void unverifiableNotificationAccessRollbackLeavesPersistentFault() {
+        Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+        fixture.gateway.changeNotificationAccessOnEveryWrite(NotificationAccessState.MISSING);
+
+        ServiceResult<RuleCreationResult> result =
+                fixture.writer.createAllNotificationsRule(selected);
+
+        assertFalse(result.isSuccess());
+        assertTrue(fixture.writer.isReadOnlyFault());
+        assertTrue(result.userMessage().contains("无法验证回滚"));
+
+        int writesAfterFault = fixture.gateway.writeCount();
+        FakeRuleStoreGateway newGateway = new FakeRuleStoreGateway(fixture.gateway.store());
+        SafeNotificationRuleWriter newWriter =
+                new SafeNotificationRuleWriter(newGateway, new FakeLastKnownGoodStore());
+
+        assertFalse(newWriter.createAllNotificationsRule(selected).isSuccess());
+        assertTrue(newWriter.isReadOnlyFault());
+        assertEquals(writesAfterFault, newGateway.writeCount());
+    }
+
+    @Test
+    public void concurrentPermissionChangeDuringWriteFailsInsteadOfBeingOverwritten() {
+        Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+        CountDownLatch writeStarted = new CountDownLatch(1);
+        CountDownLatch commitGate = new CountDownLatch(1);
+        fixture.gateway.signalWriteStarted(writeStarted);
+        fixture.gateway.pauseBeforeNextCommit(commitGate);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<ServiceResult<RuleCreationResult>> future =
+                    executor.submit(
+                            () -> fixture.writer.createAllNotificationsRule(selected));
+            assertTrue(writeStarted.await(5, TimeUnit.SECONDS));
+            FakeRuleStoreGateway externalGateway =
+                    new FakeRuleStoreGateway(fixture.gateway.store());
+            externalGateway.replaceSnapshot(
+                    withTargetAuthorization(
+                            externalGateway.snapshot(), "demo-target-a", false));
+            commitGate.countDown();
+
+            assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
+        } catch (Exception exception) {
+            throw new AssertionError(exception);
+        } finally {
+            commitGate.countDown();
+            executor.shutdownNow();
+        }
+
+        assertFalse(fixture.writer.isReadOnlyFault());
+        assertEquals(2, fixture.gateway.writeCount());
+        assertTrue(targetAuthorized(fixture.gateway.snapshot(), "demo-target-a"));
+    }
+
+    @Test
+    public void persistentFaultDuringWriteIsNotOverwrittenByOlderSnapshot() {
+        Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        List<NotificationRule> original = new ArrayList<>(fixture.gateway.currentRules());
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+        CountDownLatch writeStarted = new CountDownLatch(1);
+        CountDownLatch commitGate = new CountDownLatch(1);
+        fixture.gateway.signalWriteStarted(writeStarted);
+        fixture.gateway.pauseBeforeNextCommit(commitGate);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<ServiceResult<RuleCreationResult>> future =
+                    executor.submit(
+                            () -> fixture.writer.createAllNotificationsRule(selected));
+            assertTrue(writeStarted.await(5, TimeUnit.SECONDS));
+            FakeRuleStoreGateway externalGateway =
+                    new FakeRuleStoreGateway(fixture.gateway.store());
+            externalGateway.enterReadOnlyFault("演示持久只读故障。");
+            commitGate.countDown();
+
+            assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
+        } catch (Exception exception) {
+            throw new AssertionError(exception);
+        } finally {
+            commitGate.countDown();
+            executor.shutdownNow();
+        }
+
+        assertTrue(fixture.writer.readOnlyFaultMessage().contains("演示持久只读故障"));
+        assertSameRules(original, fixture.gateway.currentRules());
+    }
+
+    @Test
+    public void unverifiablePermissionRollbackLeavesPersistentReadOnlyFault() {
+        Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+        fixture.gateway.changeTargetAuthorizationOnEveryWrite("demo-target-a", false);
+
+        ServiceResult<RuleCreationResult> result =
+                fixture.writer.createAllNotificationsRule(selected);
+
+        assertFalse(result.isSuccess());
+        assertTrue(fixture.writer.isReadOnlyFault());
+        assertTrue(result.userMessage().contains("无法验证回滚"));
+
+        int writesAfterFault = fixture.gateway.writeCount();
+        FakeRuleStoreGateway newGateway = new FakeRuleStoreGateway(fixture.gateway.store());
+        SafeNotificationRuleWriter newWriter =
+                new SafeNotificationRuleWriter(newGateway, new FakeLastKnownGoodStore());
+
+        ServiceResult<RuleCreationResult> newResult =
+                newWriter.createAllNotificationsRule(selected);
+
+        assertFalse(newResult.isSuccess());
+        assertTrue(newWriter.isReadOnlyFault());
+        assertEquals(writesAfterFault, newGateway.writeCount());
+    }
+
+    @Test
+    public void explicitRestorePathDoesNotSilentlyClearPersistentFault() {
+        Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+        RuleLkg originalLkg =
+                fixture.writer.createAllNotificationsRule(selected)
+                        .value()
+                        .orElseThrow()
+                        .lkg();
+        fixture.gateway.markUnknownFieldsOnEveryWrite();
+        assertFalse(fixture.writer.createAllNotificationsRule(selected).isSuccess());
+        assertTrue(fixture.writer.isReadOnlyFault());
+
+        FakeRuleStoreGateway newGateway = new FakeRuleStoreGateway(fixture.gateway.store());
+        assertFalse(newGateway.restore(originalLkg).isSuccess());
+        int writesAfterRestore = newGateway.writeCount();
+        SafeNotificationRuleWriter newWriter =
+                new SafeNotificationRuleWriter(newGateway, new FakeLastKnownGoodStore());
+
+        ServiceResult<RuleCreationResult> result =
+                newWriter.createAllNotificationsRule(selected);
+
+        assertFalse(result.isSuccess());
+        assertTrue(newWriter.isReadOnlyFault());
+        assertEquals(writesAfterRestore, newGateway.writeCount());
+    }
+
+    @Test
+    public void compatibilityFlagFromSnapshotIsCombinedWithProbeEvidence() {
+        NotificationFlowSnapshot unverifiedFlow =
+                demoFlow().withConnectionState(
+                        ConnectionState.COMPATIBILITY_UNVERIFIED,
+                        demoFlow().stateVersion() + 1L);
+        Fixture fixture =
+                fixture(
+                        new RuleStoreSnapshot(
+                                unverifiedFlow,
+                                SOURCE,
+                                CapabilityEvidence.demoComplete(),
+                                false,
+                                false));
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+
+        RuleCreationResult created =
+                fixture.writer.createAllNotificationsRule(selected).value().orElseThrow();
+
+        assertTrue(created.compatibilityUnverified());
+        assertTrue(
+                created.notes().stream()
+                        .anyMatch(note -> note.contains("兼容性未经完整验收")));
+    }
+
+    @Test
+    public void missingOrRevokedNotificationAccessUsesSafeGateCopy() {
+        for (NotificationAccessState access :
+                List.of(NotificationAccessState.MISSING, NotificationAccessState.REVOKED)) {
+            NotificationFlowSnapshot flow = demoFlow().withNotificationAccess(access);
+            Fixture fixture =
+                    fixture(
+                            new RuleStoreSnapshot(
+                                    flow,
+                                    SOURCE,
+                                    CapabilityEvidence.demoComplete(),
+                                    false,
+                                    false));
+            ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+
+            RuleCreationResult created =
+                    fixture.writer.createAllNotificationsRule(selected).value().orElseThrow();
+
+            String expected = access == NotificationAccessState.MISSING ? "缺失" : "已撤销";
+            assertTrue(created.notes().stream().anyMatch(note -> note.contains(expected)));
+            assertTrue(created.notes().stream().anyMatch(note -> note.contains("受阻")));
+        }
+    }
+
+    @Test
     public void concurrentWritesAreSerializedWithoutOverwritingEachOther()
             throws Exception {
         NotificationFlowSnapshot flow =
@@ -514,6 +827,42 @@ public final class SafeNotificationRuleWriterTest {
         assertTrue(fixture.writer.lastKnownGood() != null);
     }
 
+    @Test
+    public void concurrentUpsertsQueueAtOneWriteAtATime() throws Exception {
+        Fixture fixture = fixture("demo-version-tested", "demo-version-tested", false, false);
+        fixture.gateway.setWriteDelayMillis(20L);
+        ConfirmedTargetSelection selected = confirmed(fixture, "demo-target-a");
+        int requestCount = 8;
+        ExecutorService executor = Executors.newFixedThreadPool(requestCount);
+        CountDownLatch ready = new CountDownLatch(requestCount);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<ServiceResult<RuleCreationResult>>> results = new ArrayList<>();
+        try {
+            for (int index = 0; index < requestCount; index++) {
+                results.add(
+                        executor.submit(
+                                () -> {
+                                    ready.countDown();
+                                    start.await();
+                                    return fixture.writer.createAllNotificationsRule(selected);
+                                }));
+            }
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            start.countDown();
+            for (Future<ServiceResult<RuleCreationResult>> result : results) {
+                assertTrue(result.get(5, TimeUnit.SECONDS).isSuccess());
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+
+        assertEquals(requestCount, fixture.gateway.writeCount());
+        assertEquals(1, fixture.gateway.maxConcurrentWrites());
+        assertEquals(3, fixture.gateway.currentRules().size());
+        assertEquals(1, matchingRuleCount(fixture.gateway.currentRules(), "demo-target-a"));
+        assertEquals(3, uniqueRuleIdCount(fixture.gateway.currentRules()));
+    }
+
     private static Fixture fixture(
             String version, String testedVersion, boolean unknownFields, boolean badDsl) {
         return fixture(
@@ -587,6 +936,61 @@ public final class SafeNotificationRuleWriterTest {
                 false,
                 true,
                 true);
+    }
+
+    private static RuleStoreSnapshot snapshotWithRule(
+            NotificationFlowSnapshot snapshot, String status, String dslJson) {
+        List<NotificationRule> rules = new ArrayList<>(snapshot.rules());
+        NotificationRule first = rules.get(0);
+        rules.set(
+                0,
+                new NotificationRule(
+                        first.ruleId(),
+                        first.sourceDeviceId(),
+                        first.sourceDeviceName(),
+                        first.targetDeviceId(),
+                        first.targetDeviceName(),
+                        status,
+                        first.summary(),
+                        dslJson));
+        NotificationFlowSnapshot changed =
+                new NotificationFlowSnapshot(
+                        snapshot.connectionState(),
+                        snapshot.stateVersion() + 1L,
+                        snapshot.compatibilityUnverified(),
+                        snapshot.targets(),
+                        rules,
+                        snapshot.notificationAccess(),
+                        snapshot.staleCache());
+        return new RuleStoreSnapshot(
+                changed,
+                SOURCE,
+                CapabilityEvidence.demoComplete(),
+                false,
+                false);
+    }
+
+    private static boolean targetAuthorized(
+            RuleStoreSnapshot snapshot, String targetDeviceId) {
+        return snapshot.flowSnapshot().targets().stream()
+                .filter(target -> target.deviceId().equals(targetDeviceId))
+                .findFirst()
+                .orElseThrow()
+                .targetAuthorized();
+    }
+
+    private static RuleStoreSnapshot withTargetAuthorization(
+            RuleStoreSnapshot snapshot, String targetDeviceId, boolean authorized) {
+        Map<String, Boolean> authorizations = new LinkedHashMap<>();
+        for (TargetDevice target : snapshot.flowSnapshot().targets()) {
+            authorizations.put(
+                    target.deviceId(),
+                    target.deviceId().equals(targetDeviceId)
+                            ? authorized
+                            : target.targetAuthorized());
+        }
+        return snapshot.withPermissions(
+                authorizations, snapshot.flowSnapshot().notificationAccess());
     }
 
     private static int matchingRuleCount(List<NotificationRule> rules, String targetId) {

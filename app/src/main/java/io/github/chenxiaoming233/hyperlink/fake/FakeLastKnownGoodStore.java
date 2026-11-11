@@ -8,10 +8,15 @@ public final class FakeLastKnownGoodStore implements LastKnownGoodStore {
     private RuleLkg snapshot;
     private int saveCount;
     private boolean failNextSave;
+    private boolean failNextSaveWithException;
 
     @Override
     public synchronized boolean save(RuleLkg snapshot) {
         saveCount++;
+        if (failNextSaveWithException) {
+            failNextSaveWithException = false;
+            throw new IllegalStateException("演示 LKG 保存异常。");
+        }
         if (failNextSave) {
             failNextSave = false;
             return false;
@@ -27,6 +32,10 @@ public final class FakeLastKnownGoodStore implements LastKnownGoodStore {
 
     public synchronized void failNextSave() {
         failNextSave = true;
+    }
+
+    public synchronized void failNextSaveWithException() {
+        failNextSaveWithException = true;
     }
 
     public synchronized int saveCount() {

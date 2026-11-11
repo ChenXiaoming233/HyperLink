@@ -89,6 +89,18 @@ public final class RuleLkg {
         return serializedJson;
     }
 
+    public boolean permissionsMatch(RuleStoreSnapshot snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        if (snapshot.flowSnapshot().notificationAccess() != notificationAccess) {
+            return false;
+        }
+        Map<String, Boolean> current = new LinkedHashMap<>();
+        for (TargetDevice target : snapshot.flowSnapshot().targets()) {
+            current.put(target.deviceId(), target.targetAuthorized());
+        }
+        return targetAuthorizations.equals(current);
+    }
+
     private static <T> List<T> immutableList(List<T> values) {
         Objects.requireNonNull(values, "values");
         ArrayList<T> copy = new ArrayList<>(values.size());

@@ -7,20 +7,15 @@ import io.github.chenxiaoming233.hyperlink.domain.NotificationRule;
 import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
 import io.github.chenxiaoming233.hyperlink.domain.TargetDevice;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import java.util.WeakHashMap;
 import java.util.function.Supplier;
 
 public final class SafeNotificationRuleWriter {
     private static final Object PROCESS_WRITE_LOCK = new Object();
-    private static final Map<RuleStoreGateway, String> PROCESS_FAULTS =
-            Collections.synchronizedMap(new WeakHashMap<>());
 
     private final RuleStoreGateway gateway;
     private final LastKnownGoodStore lkgStore;
@@ -53,9 +48,9 @@ public final class SafeNotificationRuleWriter {
         if (selection == null) {
             return ServiceResult.failure("未确认目标，未执行任何写入。");
         }
-        String processFault = readOnlyFaultMessageLocked();
-        if (!processFault.isEmpty()) {
-            return ServiceResult.failure(processFault);
+        String persistentFault = readOnlyFaultMessageLocked();
+        if (!persistentFault.isEmpty()) {
+            return ServiceResult.failure(persistentFault);
         }
 
         ServiceResult<RuleStoreSnapshot> readResult;
@@ -68,6 +63,9 @@ public final class SafeNotificationRuleWriter {
             return ServiceResult.failure("无法读取完整规则快照，未执行任何写入。");
         }
         RuleStoreSnapshot current = readResult.value().orElseThrow();
+        if (!current.readOnlyFaultMessage().isEmpty()) {
+            return ServiceResult.failure(current.readOnlyFaultMessage());
+        }
         NotificationFlowSnapshot flow = current.flowSnapshot();
         if (flow.staleCache()
                 || (flow.connectionState() != ConnectionState.CONNECTED
@@ -80,13 +78,9 @@ public final class SafeNotificationRuleWriter {
         if (!capability.passed()) {
             return ServiceResult.failure(capability.readOnlyMessage());
         }
-        if (current.unknownFieldsPresent()) {
-            return enterReadOnlyFaultLocked(
-                    "规则快照包含未知字段，为避免部分写入，当前规则写入保持只读。");
-        }
-        if (current.unexpressibleDslPresent()) {
-            return enterReadOnlyFaultLocked(
-                    "规则快照包含不可表达 DSL，为避免部分写入，当前规则写入保持只读。");
+        String snapshotIssue = RuleSnapshotValidator.issue(current);
+        if (!snapshotIssue.isEmpty()) {
+            return enterReadOnlyFaultLocked(snapshotIssue);
         }
         if (!selection.source().deviceId().equals(current.sourceDevice().deviceId())) {
             return ServiceResult.failure("来源设备与当前规则快照不一致，未执行任何写入。");
@@ -144,6 +138,7 @@ public final class SafeNotificationRuleWriter {
         }
         RuleStoreSnapshot verified = readBack.value().orElseThrow();
         if (hasUnsafeStructure(verified)
+                || !lkg.permissionsMatch(verified)
                 || !writeResult.value().orElseThrow().serializedJson().equals(expectedSerialized)
                 || !verified.serializedJson().equals(expectedSerialized)
                 || !matchesRules(candidate, verified.rules())
@@ -159,12 +154,14 @@ public final class SafeNotificationRuleWriter {
         if (!selection.offlineWarning().isEmpty()) {
             notes.add(selection.offlineWarning());
         }
-        if (capability.compatibilityUnverified()) {
+        boolean compatibilityUnverified =
+                capability.compatibilityUnverified() || flow.compatibilityUnverified();
+        if (compatibilityUnverified) {
             notes.add("兼容性未经完整验收：运行时能力探测已通过，但当前 VoiceAssist 版本未完成完整验收。");
         }
         return ServiceResult.success(
                 new RuleCreationResult(
-                        createdRule, lkg, capability.compatibilityUnverified(), notes));
+                        createdRule, lkg, compatibilityUnverified, notes));
     }
 
     public boolean isReadOnlyFault() {
@@ -198,7 +195,7 @@ public final class SafeNotificationRuleWriter {
     private boolean rollbackAndVerify(RuleLkg lkg) {
         ServiceResult<RuleWriteReceipt> rollbackWrite;
         try {
-            rollbackWrite = gateway.write(lkg.rules());
+            rollbackWrite = gateway.restore(lkg);
         } catch (RuntimeException exception) {
             return false;
         }
@@ -221,24 +218,33 @@ public final class SafeNotificationRuleWriter {
         }
         RuleStoreSnapshot verified = readBack.value().orElseThrow();
         return !hasUnsafeStructure(verified)
+                && lkg.permissionsMatch(verified)
                 && verified.serializedJson().equals(lkg.serializedJson())
                 && matchesRules(lkg.rules(), verified.rules())
                 && uniqueRuleIds(verified.rules());
     }
 
     private ServiceResult<RuleCreationResult> enterReadOnlyFaultLocked(String message) {
-        PROCESS_FAULTS.put(gateway, message);
+        try {
+            gateway.enterReadOnlyFault(message);
+        } catch (RuntimeException exception) {
+            return ServiceResult.failure(
+                    message + " 无法持久化故障态，请停止写入并检查适配器。");
+        }
         return ServiceResult.failure(message);
     }
 
     private String readOnlyFaultMessageLocked() {
-        String message = PROCESS_FAULTS.get(gateway);
-        return message == null ? "" : message;
+        try {
+            String message = gateway.readOnlyFaultMessage();
+            return message == null ? "" : message;
+        } catch (RuntimeException exception) {
+            return "无法读取持久只读故障态，当前规则写入保持只读。";
+        }
     }
 
     private static boolean hasUnsafeStructure(RuleStoreSnapshot snapshot) {
-        return snapshot.unknownFieldsPresent()
-                || snapshot.unexpressibleDslPresent()
+        return !RuleSnapshotValidator.issue(snapshot).isEmpty()
                 || !CapabilityProbe.evaluate(snapshot.capabilities()).passed();
     }
 
