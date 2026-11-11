@@ -15,15 +15,19 @@ final class RuleEditorLoadState {
 
     static RuleEditorLoadState from(RuleStoreGateway gateway) {
         Objects.requireNonNull(gateway, "gateway");
-        ServiceResult<?> result = gateway.read();
-        if (!result.isSuccess()) {
-            return blocked("无法读取共享 fake store，生命周期编辑器已隐藏写入操作。");
+        try {
+            ServiceResult<?> result = gateway.read();
+            if (!result.isSuccess()) {
+                return blocked("无法读取共享 fake store，生命周期编辑器已隐藏写入操作。");
+            }
+            String readOnlyFault = gateway.readOnlyFaultMessage();
+            if (!readOnlyFault.isEmpty()) {
+                return blocked("共享 fake store 处于只读故障态：" + readOnlyFault);
+            }
+            return new RuleEditorLoadState(true, "");
+        } catch (RuntimeException exception) {
+            return blocked("无法安全读取共享 fake store，生命周期编辑器已隐藏写入操作。");
         }
-        String readOnlyFault = gateway.readOnlyFaultMessage();
-        if (!readOnlyFault.isEmpty()) {
-            return blocked("共享 fake store 处于只读故障态：" + readOnlyFault);
-        }
-        return new RuleEditorLoadState(true, "");
     }
 
     boolean writable() {

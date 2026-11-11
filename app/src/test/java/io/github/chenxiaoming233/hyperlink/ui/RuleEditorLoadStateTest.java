@@ -100,6 +100,39 @@ public final class RuleEditorLoadStateTest {
     }
 
     @Test
+    public void structuredSaveReadExceptionClosesGateWithoutThrowingOrLeakingDetails() {
+        StructuredSaveFixture fixture = structuredSaveFixture();
+        fixture.gateway.throwReadsAfterNextWrite(3);
+        int writesBefore = fixture.gateway.writeCount();
+        ServiceResult<RuleCreationResult> first;
+        try {
+            first = fixture.writer.saveStructuredRule(fixture.selected, fixture.draft);
+        } catch (RuntimeException exception) {
+            throw new AssertionError("保存失败路径不应抛出运行时异常。", exception);
+        }
+        assertFalse(first.isSuccess());
+        assertTrue(fixture.gateway.writeCount() > writesBefore);
+
+        RuleEditorLoadState loadState;
+        try {
+            loadState =
+                    fixture.writeGate.refreshAfterWriteFailure(fixture.gateway, true);
+        } catch (RuntimeException exception) {
+            throw new AssertionError("写失败刷新不应让读取异常冒泡。", exception);
+        }
+
+        assertFalse(loadState.writable());
+        assertFalse(fixture.writeGate.writesAvailable());
+        assertTrue(loadState.message().contains("无法安全读取"));
+        assertFalse(loadState.message().contains("演示规则读取异常"));
+        ServiceResult<RuleCreationResult> second =
+                fixture.writeGate.writesAvailable()
+                        ? fixture.writer.saveStructuredRule(fixture.selected, fixture.draft)
+                        : ServiceResult.failure("编辑器写门禁已关闭。");
+        assertFalse(second.isSuccess());
+    }
+
+    @Test
     public void successfulStructuredSaveKeepsGateWritable() {
         StructuredSaveFixture fixture = structuredSaveFixture();
 
