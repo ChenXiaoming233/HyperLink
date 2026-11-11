@@ -1,0 +1,5 @@
+.scratch/notif-settings/apk/
+.scratch/notif-settings/dex/
+.scratch/notif-settings/out/
+hs_err_pid*.log
+backups/
