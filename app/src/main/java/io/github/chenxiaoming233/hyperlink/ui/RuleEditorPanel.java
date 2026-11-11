@@ -64,13 +64,9 @@ final class RuleEditorPanel extends LinearLayout {
     private final List<CheckBox> presetChecks = new ArrayList<>();
     private final EditableViewTracker<View> persistentEditableViews =
             new EditableViewTracker<>();
-    private final EditableViewTracker<View> appEditableViews =
-            new EditableViewTracker<>();
-    private final EditableViewTracker<View> structureEditableViews =
-            new EditableViewTracker<>();
-    private final EditableViewTracker<View> existingRuleEditableViews =
-            new EditableViewTracker<>();
-    private final RuleEditorMutationGate mutationGate;
+    private final RuleEditorRefreshCoordinator<View> refreshCoordinator =
+            new RuleEditorRefreshCoordinator<>();
+    private final RuleEditorInteractionPolicy interactionPolicy;
 
     private StructuredRuleDraft draft;
     private AppConditionEditorModel appEditor;
@@ -111,7 +107,7 @@ final class RuleEditorPanel extends LinearLayout {
                 new SafeNotificationRuleWriter(gateway, new FakeLastKnownGoodStore());
         this.targetSelectionFlow = new TargetSelectionFlow(snapshot);
         this.modelReadiness = RuleModelReadiness.inspect(gateway);
-        this.mutationGate = new RuleEditorMutationGate(modelReadiness);
+        this.interactionPolicy = new RuleEditorInteractionPolicy(modelReadiness);
         this.draft = StructuredRuleDraft.empty(System.currentTimeMillis());
         this.selectedTargetId = targets.isEmpty() ? "" : targets.get(0).deviceId();
         setOrientation(VERTICAL);
@@ -345,7 +341,7 @@ final class RuleEditorPanel extends LinearLayout {
                         .withShowAllInstalled(showAllApps)
                         .withSearchQuery(appQuery);
         appScopeView.setText(appScopeText());
-        appEditableViews.clear();
+        refreshCoordinator.beginRebuild(RuleEditorRefreshCoordinator.Area.APP);
         appItemsContainer.removeAllViews();
         updatingApps = true;
         try {
@@ -390,24 +386,22 @@ final class RuleEditorPanel extends LinearLayout {
                     if (updatingApps) {
                         return;
                     }
-                    if (rejectWhenReadOnly()) {
+                    RuleEditorInteractionPolicy.AppSelection selection =
+                            interactionPolicy.selectApp(appEditor, item.packageName());
+                    if (!selection.accepted()) {
                         updatingApps = true;
                         try {
                             button.setChecked(item.selected());
                         } finally {
                             updatingApps = false;
                         }
+                        setStatus(selection.message());
                         return;
                     }
-                    if (appEditor == null) {
-                        setStatus("请先在规则分支中选定一个 app 条件作用域。");
-                        return;
-                    }
-                    appEditor = appEditor.togglePackage(item.packageName());
+                    appEditor = selection.editor();
                     refreshApps();
                 });
         trackAppEditable(check);
-        check.setEnabled(modelReadiness.writable() && appEditor != null);
         LinearLayout.LayoutParams checkParams =
                 new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
         checkParams.leftMargin = dp(8);
@@ -420,7 +414,7 @@ final class RuleEditorPanel extends LinearLayout {
             return;
         }
         summaryView.setText("自动摘要：" + draft.summary());
-        structureEditableViews.clear();
+        refreshCoordinator.beginRebuild(RuleEditorRefreshCoordinator.Area.STRUCTURE);
         structureContainer.removeAllViews();
         if (draft.groups().isEmpty()) {
             structureContainer.addView(
@@ -1015,7 +1009,8 @@ final class RuleEditorPanel extends LinearLayout {
         if (existingRulesContainer == null) {
             return;
         }
-        existingRuleEditableViews.clear();
+        refreshCoordinator.beginRebuild(
+                RuleEditorRefreshCoordinator.Area.EXISTING_RULES);
         existingRulesContainer.removeAllViews();
         for (NotificationRule rule : gateway.currentRules()) {
             existingRulesContainer.addView(createExistingRuleCard(rule));
@@ -1114,7 +1109,7 @@ final class RuleEditorPanel extends LinearLayout {
         if (modelReadiness == null) {
             return;
         }
-        mutationGate.update(modelReadiness);
+        interactionPolicy.update(modelReadiness);
         if (modelReadinessView != null) {
             if (modelReadiness.writable()) {
                 modelReadinessView.setText(
@@ -1132,19 +1127,27 @@ final class RuleEditorPanel extends LinearLayout {
         }
         boolean writable = modelReadiness.writable();
         persistentEditableViews.forEach(view -> view.setEnabled(writable));
-        structureEditableViews.forEach(view -> view.setEnabled(writable));
-        existingRuleEditableViews.forEach(view -> view.setEnabled(writable));
-        appEditableViews.forEach(
-                view -> view.setEnabled(writable && appEditor != null));
+        refreshCoordinator.forEach(
+                RuleEditorRefreshCoordinator.Area.APP,
+                view ->
+                        view.setEnabled(
+                                interactionPolicy.appCheckboxEnabled(
+                                        appEditor != null)));
+        refreshCoordinator.forEach(
+                RuleEditorRefreshCoordinator.Area.STRUCTURE,
+                view -> view.setEnabled(interactionPolicy.canEdit()));
+        refreshCoordinator.forEach(
+                RuleEditorRefreshCoordinator.Area.EXISTING_RULES,
+                view -> view.setEnabled(interactionPolicy.canEdit()));
     }
 
     private boolean rejectWhenReadOnly() {
-        if (mutationGate.writable()) {
+        if (interactionPolicy.canEdit()) {
             return false;
         }
         setStatus(
                 "整份规则模型为只读："
-                        + mutationGate.reason()
+                        + interactionPolicy.reason()
                         + " 未执行编辑或保存；请修复 fake 快照后重新检测。");
         return true;
     }
@@ -1186,19 +1189,21 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private <T extends View> T trackAppEditable(T view) {
-        appEditableViews.track(view);
+        refreshCoordinator.track(RuleEditorRefreshCoordinator.Area.APP, view);
+        view.setEnabled(interactionPolicy.appCheckboxEnabled(appEditor != null));
         return view;
     }
 
     private <T extends View> T trackStructureEditable(T view) {
-        structureEditableViews.track(view);
-        view.setEnabled(modelReadiness != null && modelReadiness.writable());
+        refreshCoordinator.track(RuleEditorRefreshCoordinator.Area.STRUCTURE, view);
+        view.setEnabled(interactionPolicy.canEdit());
         return view;
     }
 
     private <T extends View> T trackExistingRuleEditable(T view) {
-        existingRuleEditableViews.track(view);
-        view.setEnabled(modelReadiness != null && modelReadiness.writable());
+        refreshCoordinator.track(
+                RuleEditorRefreshCoordinator.Area.EXISTING_RULES, view);
+        view.setEnabled(interactionPolicy.canEdit());
         return view;
     }
 
