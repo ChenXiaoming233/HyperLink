@@ -6,6 +6,7 @@ import io.github.chenxiaoming233.hyperlink.domain.NotificationFlowSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationRule;
 import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
 import io.github.chenxiaoming233.hyperlink.domain.TargetDevice;
+import io.github.chenxiaoming233.hyperlink.domain.editor.StructuredRuleDraft;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -43,8 +44,33 @@ public final class SafeNotificationRuleWriter {
         }
     }
 
+    public ServiceResult<RuleCreationResult> saveStructuredRule(
+            ConfirmedTargetSelection selection, StructuredRuleDraft draft) {
+        synchronized (PROCESS_WRITE_LOCK) {
+            return saveStructuredRuleLocked(selection, draft);
+        }
+    }
+
     private ServiceResult<RuleCreationResult> createAllNotificationsRuleLocked(
             ConfirmedTargetSelection selection) {
+        return writeRuleLocked(
+                selection,
+                (source, target, rules) -> createRule(source, target, rules));
+    }
+
+    private ServiceResult<RuleCreationResult> saveStructuredRuleLocked(
+            ConfirmedTargetSelection selection, StructuredRuleDraft draft) {
+        if (draft == null) {
+            return ServiceResult.failure("未提供结构化规则，未执行任何写入。");
+        }
+        return writeRuleLocked(
+                selection,
+                (source, target, rules) ->
+                        createStructuredRule(source, target, rules, draft));
+    }
+
+    private ServiceResult<RuleCreationResult> writeRuleLocked(
+            ConfirmedTargetSelection selection, RuleFactory ruleFactory) {
         if (selection == null) {
             return ServiceResult.failure("未确认目标，未执行任何写入。");
         }
@@ -112,11 +138,13 @@ public final class SafeNotificationRuleWriter {
         List<NotificationRule> candidate;
         String expectedSerialized;
         try {
-            createdRule = createRule(current.sourceDevice(), target, current.rules());
+            createdRule =
+                    ruleFactory.create(
+                            current.sourceDevice(), target, current.rules());
             candidate = upsert(current.rules(), createdRule);
             expectedSerialized = RuleSerialization.serialize(candidate);
         } catch (RuntimeException exception) {
-            return ServiceResult.failure("无法生成唯一规则标识，未执行任何写入。");
+            return ServiceResult.failure("无法生成有效规则，未执行任何写入。");
         }
 
         ServiceResult<RuleWriteReceipt> writeResult;
@@ -381,7 +409,50 @@ public final class SafeNotificationRuleWriter {
                 target.displayName(),
                 "active",
                 summary,
-                dsl);
+                dsl,
+                System.currentTimeMillis());
+    }
+
+    private NotificationRule createStructuredRule(
+            SourceDevice source,
+            TargetDevice target,
+            List<NotificationRule> currentRules,
+            StructuredRuleDraft draft) {
+        if (!draft.canSave()) {
+            throw new IllegalArgumentException("Structured rule has no filter groups");
+        }
+        NotificationRule existing =
+                findMatchingRule(currentRules, source, target);
+        if (existing != null
+                && draft.hasRuleId()
+                && !draft.ruleId().equals(existing.ruleId())) {
+            throw new IllegalArgumentException("Structured draft ruleId does not match target rule");
+        }
+        String ruleId;
+        if (existing != null) {
+            ruleId = existing.ruleId();
+        } else if (draft.hasRuleId()) {
+            if (containsRuleId(currentRules, draft.ruleId())) {
+                throw new IllegalArgumentException("Structured draft ruleId is already in use");
+            }
+            ruleId = draft.ruleId();
+        } else {
+            ruleId = nextUniqueRuleId(currentRules);
+        }
+        String status = existing == null ? draft.status() : existing.status();
+        long createdAt = existing == null ? draft.createdAt() : existing.createdAt();
+        String summary = draft.summary();
+        String dsl = StructuredRuleDsl.serialize(draft);
+        return new NotificationRule(
+                ruleId,
+                source.deviceId(),
+                source.displayName(),
+                target.deviceId(),
+                target.displayName(),
+                status,
+                summary,
+                dsl,
+                createdAt);
     }
 
     private String nextUniqueRuleId(List<NotificationRule> rules) {
@@ -511,6 +582,16 @@ public final class SafeNotificationRuleWriter {
         return true;
     }
 
+    private static boolean containsRuleId(
+            List<NotificationRule> rules, String ruleId) {
+        for (NotificationRule rule : rules) {
+            if (rule.ruleId().equals(ruleId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static boolean matchesRules(
             List<NotificationRule> expected, List<NotificationRule> actual) {
         if (expected.size() != actual.size()) {
@@ -532,6 +613,15 @@ public final class SafeNotificationRuleWriter {
                 && left.targetDeviceName().equals(right.targetDeviceName())
                 && left.status().equals(right.status())
                 && left.summary().equals(right.summary())
-                && left.dslJson().equals(right.dslJson());
+                && left.dslJson().equals(right.dslJson())
+                && left.createdAt() == right.createdAt();
+    }
+
+    @FunctionalInterface
+    private interface RuleFactory {
+        NotificationRule create(
+                SourceDevice source,
+                TargetDevice target,
+                List<NotificationRule> currentRules);
     }
 }

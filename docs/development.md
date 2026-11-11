@@ -1,11 +1,12 @@
 # HyperLink 开发与测试
 
-当前阶段包含可离线验证的模块骨架、领域接口、RPC 纯层、fake 只读面板和 fake 安全写入
-事务层。它不包含真实 LSPosed Hook、VoiceAssist Provider 接线或设备级兼容性验收。
+当前阶段包含可离线验证的模块骨架、领域接口、RPC 纯层、fake 场景面板、fake 安全写入
+事务层和 fake 结构化规则编辑器。它不包含真实 LSPosed Hook、VoiceAssist Provider 接线
+或设备级兼容性验收。
 
 ## fake 只读面板
 
-独立设置面板只调用内存中的 `FakeNotificationFlowService`，不读取 VoiceAssist 规则
+场景展示只调用内存中的 `FakeNotificationFlowService`，不读取 VoiceAssist 规则
 文件、权限 store、Provider 或 `notification-subscriptions.json`。所有 fake 设备名、
 设备 ID、来源、规则 ID 和 DSL 示例均为合成占位（如 `Demo-PC`、`demo-target-a`、
 `demo-rule-1`），不包含真实设备关联信息。面板提供正常、过期缓存、空数据、读取失败、
@@ -16,7 +17,7 @@
 PC、PAD、MAC 目标；手机等其他类型会被过滤。目标授权与系统通知使用权分别展示，
 离线目标保留显示并明确说明不会排队或自动重试。
 
-过期快照会标记“缓存快照已过期”，且不提供写入入口。`NotificationFlowService` 只有
+过期快照会标记“缓存快照已过期”，且不能载入写入流程。`NotificationFlowService` 只有
 `readSnapshot()` 操作；“已启用”或 fake 快照成功均不代表通知已经送达，也不代表真实
 MiLink/VoiceAssist 已接线。未激活、进程不可达或能力不足时仍展示各自原因，不把未知
 列表误写成“空数据”；读取失败时列表区显示“无法确定”，而不是断言没有设备或规则。
@@ -60,6 +61,35 @@ writer 仍会读取该故障态并 fail-closed；显式规则恢复不会自动�
 降级、任意反射入口或生产环境文件写入。`FakeRuleStore` 只模拟持久 store 的共享故障态，
 不模拟文件格式、进程重启后的磁盘持久化或真实原子性；真实持久化仍属于 #5/#9。
 
+## fake 结构化规则编辑器
+
+设置页的结构化编辑器使用独立的内存 `FakeRuleStoreGateway`、`FakeLastKnownGoodStore`
+和 `SafeNotificationRuleWriter`。保存按钮只在用户显式点击后调用安全写入链路；页面不会
+自动保存，也不存在真实路径降级、认证绕过或能力探测绕过。所有目标、规则、应用名称和
+包名均为 `Demo-*` / `demo.*` 合成数据，不读取真实已安装应用、图标、VoiceAssist 规则、
+权限 store、Provider 或设备。首次使用未授权目标时必须展示目标名和授权含义，只有用户
+确认后才调用 `confirmAuthorization()`；拒绝会取消保存。离线目标同样要求显式确认，
+不能作为普通成功路径静默继续。
+
+IM、焦点通知和短信验证码只是临时编辑模板。展开后分别变成 `app in`、`isIsland is true`
+和 `isVerifyCode is true` 条件，多个模板生成同一 AND 组下的多个 OR 规则分支；保存的 DSL
+不包含预设类型。编辑器支持 AND 组、OR 分支和条件的新增、删除、移动与基础编辑，应用
+条件支持 `in` / `not_in` 集合，布尔条件支持 `true` / `false`。
+
+规则摘要始终由 andGroups → branches → conditions 结构生成，用户不能手写 `ruleText`；
+筛选结构变化会更新摘要，仅状态变化不会改变摘要。编辑现有规则时按 source+target upsert，
+并由 `SafeNotificationRuleWriter` 保留原 `ruleId`、状态和 `createdAt`，不会产生重复规则。
+
+应用选择器通过 fake `AppCatalog` 提供搜索、多选、名称和图标占位。默认仅展示可启动应用
+和规则已引用应用，可切换到全部已安装应用；已引用但未安装的应用继续保留并标记“未安装”，
+没有可解析名称时直接显示包名。应用选择结果绑定当前 AND 组 / OR 分支中的当前 app
+条件，载入规则或切换条件时只载入该条件的包集合，不会把所有分支包并成全局选择；应用
+多选只替换当前 app 条件，其他分支保持不变。
+
+安全写入成功后，编辑器逐条展示 `RuleCreationResult.notes`，包括离线、目标未授权、
+系统通知使用权和兼容性未验收等提示，不以通用成功文案覆盖。完整快照若已存在重复
+source+target 规则，writer 会进入持久只读故障态且不执行 upsert，避免静默删除重复规则。
+
 ## 环境
 
 - JDK 17
@@ -90,6 +120,12 @@ DSL/状态结构校验、兼容性标记合并、LKG 保存异常、系统通知
 并发写入不互相覆盖、并发撤销不被回滚覆盖、store 版本冲突不覆盖外部规则、完整目标状态
 回读、提交后回读前的权限变化、同版本外部规则变化、回滚后故障检测，以及故障持久化失败
 时的共享内存只读闸门。
+结构化编辑器测试额外覆盖三种预设展开为多个 OR 分支、AND 组/分支/条件的增删排序与
+编辑、`in` / `not_in` 与布尔值 DSL、摘要随筛选更新但状态变化不变、搜索结果与多选、
+默认应用集合与全部已安装切换、未安装引用保留、名称回退包名，以及编辑 paused 规则时
+复用安全写入链路并保留 `ruleId`、`status`、`createdAt` 且不产生重复规则。纯层 UI 测试
+额外覆盖授权允许/拒绝、离线显式确认、notes 全量反馈，以及 A/B 两个分支的 app 条件
+作用域隔离；安全写入测试覆盖重复 source+target 快照 fail-closed。
 
 ## 构建 APK
 
@@ -97,8 +133,9 @@ DSL/状态结构校验、兼容性标记合并、LKG 保存异常、系统通知
 ./gradlew --no-daemon assembleDebug
 ```
 
-生成的 APK 可安装并打开独立的 fake 状态面板。LSPosed 元数据与 `xposed_init` 仅建立
-模块加载骨架；当前模块不会安装任何方法 Hook，也不会改变 MiLink 或 VoiceAssist 行为。
+生成的 APK 可安装并打开独立的 fake 状态面板与结构化编辑器。LSPosed 元数据与
+`xposed_init` 仅建立模块加载骨架；当前模块不会安装任何方法 Hook，也不会改变 MiLink 或
+VoiceAssist 行为。
 
 ## 当前边界
 

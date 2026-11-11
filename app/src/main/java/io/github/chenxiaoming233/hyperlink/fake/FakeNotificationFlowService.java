@@ -115,7 +115,7 @@ public final class FakeNotificationFlowService implements NotificationFlowServic
                                   "andGroups": [
                                     {
                                       "branches": [
-                                        [{"field": "app", "op": "in", "value": "[\\\"demo.app.chat\\\",\\\"demo.app.social\\\"]"}],
+                                        [{"field": "app", "op": "in", "value": "[\\\"demo.app.chat\\\",\\\"demo.app.social\\\",\\\"demo.app.retired\\\"]"}],
                                         [{"field": "isIsland", "op": "is", "value": "true"}],
                                         [{"field": "isVerifyCode", "op": "is", "value": "true"}]
                                       ]
@@ -123,7 +123,8 @@ public final class FakeNotificationFlowService implements NotificationFlowServic
                                   ],
                                   "ruleText": "已开启通知转发到电脑 Demo-PC：演示消息、焦点通知或验证码。"
                                 }
-                                """),
+                                """,
+                                1_700_000_000_001L),
                         new NotificationRule(
                                 "demo-rule-2",
                                 "demo-source-phone",
@@ -143,7 +144,8 @@ public final class FakeNotificationFlowService implements NotificationFlowServic
                                   ],
                                   "ruleText": "已暂停转发到 Mac Demo-Mac：验证码。"
                                 }
-                                """),
+                                """,
+                                1_700_000_000_002L),
                         new NotificationRule(
                                 "demo-rule-3",
                                 "demo-source-phone",
@@ -156,7 +158,8 @@ public final class FakeNotificationFlowService implements NotificationFlowServic
                                 {
                                   "ruleText": "已开启通知转发到平板 Demo-Pad：所有符合条件的通知。"
                                 }
-                                """));
+                                """,
+                                1_700_000_000_003L));
         return new NotificationFlowSnapshot(
                 connectionState,
                 1L,
