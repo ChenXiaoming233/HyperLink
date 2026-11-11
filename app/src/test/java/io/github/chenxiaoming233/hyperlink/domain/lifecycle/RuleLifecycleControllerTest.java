@@ -20,7 +20,10 @@ import io.github.chenxiaoming233.hyperlink.fake.FakeLastKnownGoodStore;
 import io.github.chenxiaoming233.hyperlink.fake.FakeNotificationFlowService;
 import io.github.chenxiaoming233.hyperlink.fake.FakeRuleStoreGateway;
 import io.github.chenxiaoming233.hyperlink.fake.FakeTargetPermissionGateway;
+import io.github.chenxiaoming233.hyperlink.ui.PanelDisplayModel;
+import io.github.chenxiaoming233.hyperlink.ui.PanelStateMapper;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -182,8 +185,8 @@ public final class RuleLifecycleControllerTest {
     public void deleteFailsClosedWhenTargetChangesButAuthorizationBooleanStaysSame() {
         Fixture fixture = fixture();
         DeleteConfirmation confirmation =
-                fixture.controller.requestDelete("demo-rule-3").value().orElseThrow();
-        fixture.changeRuleTarget("demo-rule-3", "demo-target-f");
+                fixture.controller.requestDelete("demo-rule-1").value().orElseThrow();
+        fixture.changeRuleTarget("demo-rule-1", "demo-target-g");
         int writesBefore = fixture.gateway.writeCount();
 
         ServiceResult<RuleLifecycleModel> result =
@@ -191,12 +194,12 @@ public final class RuleLifecycleControllerTest {
 
         assertFalse(result.isSuccess());
         assertTrue(result.userMessage().contains("目标"));
-        assertTrue(fixture.hasRule("demo-rule-3"));
-        assertEquals("demo-target-f", fixture.rule("demo-rule-3").targetDeviceId());
+        assertTrue(fixture.hasRule("demo-rule-1"));
+        assertEquals("demo-target-g", fixture.rule("demo-rule-1").targetDeviceId());
         assertEquals(writesBefore, fixture.gateway.writeCount());
         assertEquals(0, fixture.permissions.revokeCount());
-        assertFalse(fixture.target("demo-target-c").targetAuthorized());
-        assertFalse(fixture.target("demo-target-f").targetAuthorized());
+        assertTrue(fixture.target("demo-target-a").targetAuthorized());
+        assertTrue(fixture.target("demo-target-g").targetAuthorized());
     }
 
     @Test
@@ -301,6 +304,7 @@ public final class RuleLifecycleControllerTest {
                         new AtomicLong(1_000L)::get,
                         UNDO_WINDOW_MILLIS);
         controller.refresh();
+        assertTrue(controller.resume("demo-rule-2").isSuccess());
         DeleteConfirmation confirmation =
                 controller.requestDelete("demo-rule-1").value().orElseThrow();
         ExecutorService executor = Executors.newFixedThreadPool(2);
@@ -316,7 +320,7 @@ public final class RuleLifecycleControllerTest {
                             () -> {
                                 pauseStarted.countDown();
                                 try {
-                                    return controller.pause("demo-rule-3");
+                                    return controller.pause("demo-rule-2");
                                 } finally {
                                     pauseFinished.countDown();
                                 }
@@ -327,12 +331,178 @@ public final class RuleLifecycleControllerTest {
             releaseRevoke.countDown();
             assertTrue(deletion.get(2L, TimeUnit.SECONDS).isSuccess());
             assertTrue(pause.get(2L, TimeUnit.SECONDS).isSuccess());
-            assertEquals("paused", rule(gateway, "demo-rule-3").status());
+            assertEquals("paused", rule(gateway, "demo-rule-2").status());
             assertTrue(controller.model().undoToken().isPresent());
         } finally {
             releaseRevoke.countDown();
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    public void sharedStoreRefreshUpdatesPageModelAndKeepsUndoToken() {
+        Fixture fixture = fixture();
+
+        RuleUndoToken token =
+                fixture.controller
+                        .pause("demo-rule-1")
+                        .value()
+                        .orElseThrow()
+                        .undoToken()
+                        .orElseThrow();
+        RuleLifecycleModel refreshed = fixture.controller.refresh().value().orElseThrow();
+        PanelDisplayModel page =
+                PanelStateMapper.map(fixture.gateway.snapshot().flowSnapshot());
+
+        PanelDisplayModel.RuleItem pageRule = null;
+        for (PanelDisplayModel.RuleItem candidate : page.rules()) {
+            if (candidate.ruleId().equals("demo-rule-1")) {
+                pageRule = candidate;
+                break;
+            }
+        }
+        assertNotNull(pageRule);
+        assertEquals("paused", pageRule.storedStatus());
+        assertEquals("已暂停", pageRule.statusLabel());
+        assertEquals(
+                token.sequence(),
+                refreshed.undoToken().orElseThrow().sequence());
+        assertTrue(refreshed.canUndo());
+    }
+
+    @Test
+    public void unwritableSnapshotsDisableEveryLifecycleActionButKeepUndoToken() {
+        Fixture stale = fixture();
+        preparePausedAndActiveRules(stale);
+        stale.setStaleCache(true);
+        assertLifecycleActionsDisabled(stale.controller.refresh().value().orElseThrow());
+
+        Fixture unreachable = fixture();
+        preparePausedAndActiveRules(unreachable);
+        unreachable.setConnectionState(ConnectionState.TARGET_PROCESS_UNREACHABLE);
+        assertLifecycleActionsDisabled(unreachable.controller.refresh().value().orElseThrow());
+
+        Fixture connectionCapability = fixture();
+        preparePausedAndActiveRules(connectionCapability);
+        connectionCapability.setConnectionState(ConnectionState.CAPABILITY_INSUFFICIENT);
+        assertLifecycleActionsDisabled(
+                connectionCapability.controller.refresh().value().orElseThrow());
+
+        Fixture evidenceCapability = fixture();
+        preparePausedAndActiveRules(evidenceCapability);
+        evidenceCapability.setCapabilities(
+                new CapabilityEvidence(
+                        "demo-version", Collections.singleton("demo-version"), Collections.emptyMap()));
+        assertLifecycleActionsDisabled(
+                evidenceCapability.controller.refresh().value().orElseThrow());
+
+        Fixture compatibility = fixture();
+        preparePausedAndActiveRules(compatibility);
+        compatibility.setConnectionState(ConnectionState.COMPATIBILITY_UNVERIFIED);
+        RuleLifecycleModel compatible =
+                compatibility.controller.refresh().value().orElseThrow();
+        assertTrue(compatible.blockedError().isEmpty());
+        assertTrue(compatible.rule("demo-rule-1").orElseThrow().canResume());
+        assertTrue(compatible.rule("demo-rule-2").orElseThrow().canPause());
+        assertTrue(compatible.canUndo());
+    }
+
+    @Test
+    public void notificationAccessLossDisablesWritesAndKeepsUndoToken() {
+        Fixture fixture = fixture();
+        preparePausedAndActiveRules(fixture);
+        fixture.setNotificationAccess(NotificationAccessState.MISSING);
+
+        RuleLifecycleModel model = fixture.controller.refresh().value().orElseThrow();
+
+        assertFalse(model.rule("demo-rule-1").orElseThrow().canResume());
+        assertFalse(model.rule("demo-rule-2").orElseThrow().canPause());
+        assertFalse(model.rule("demo-rule-1").orElseThrow().canDelete());
+        assertFalse(model.canUndo());
+        assertTrue(model.undoToken().isPresent());
+    }
+
+    @Test
+    public void directLifecycleCallsFailBeforeStoreWriteWhenAuthorizationIsMissing() {
+        Fixture unauthorizedTarget = fixture();
+        unauthorizedTarget.controller.refresh();
+        ServiceResult<RuleLifecycleModel> targetResult =
+                unauthorizedTarget.controller.pause("demo-rule-3");
+        assertFalse(targetResult.isSuccess());
+        assertEquals(0, unauthorizedTarget.gateway.writeCount());
+
+        Fixture missingAccess = fixture();
+        missingAccess.setNotificationAccess(NotificationAccessState.MISSING);
+        missingAccess.controller.refresh();
+        ServiceResult<RuleLifecycleModel> accessResult =
+                missingAccess.controller.pause("demo-rule-1");
+        assertFalse(accessResult.isSuccess());
+        assertEquals(0, missingAccess.gateway.writeCount());
+    }
+
+    @Test
+    public void recheckDoesNotClearConflictWhenTargetDisappears() {
+        Fixture fixture = fixture();
+        fixture.controller.refresh();
+        fixture.setTargetAuthorization("demo-target-a", false);
+        assertFalse(fixture.controller.pause("demo-rule-1").isSuccess());
+        fixture.removeTarget("demo-target-a");
+
+        RuleLifecycleModel refreshed = fixture.controller.refresh().value().orElseThrow();
+
+        assertFalse(refreshed.blockedError().isEmpty());
+        assertFalse(refreshed.canUndo());
+    }
+
+    @Test
+    public void recheckDoesNotClearConflictWhenRuleTargetStillMismatches() {
+        Fixture fixture = fixture();
+        RuleUndoToken token =
+                fixture.controller
+                        .pause("demo-rule-1")
+                        .value()
+                        .orElseThrow()
+                        .undoToken()
+                        .orElseThrow();
+        fixture.changeRuleTarget("demo-rule-1", "demo-target-g");
+        assertFalse(fixture.controller.undo(token).isSuccess());
+
+        RuleLifecycleModel refreshed = fixture.controller.refresh().value().orElseThrow();
+
+        assertFalse(refreshed.blockedError().isEmpty());
+        assertEquals("demo-target-g", fixture.rule("demo-rule-1").targetDeviceId());
+    }
+
+    @Test
+    public void recheckWaitsForStaleSnapshotToRecoverBeforeClearingConflict() {
+        Fixture fixture = fixture();
+        fixture.controller.refresh();
+        fixture.setStaleCache(true);
+        assertFalse(fixture.controller.pause("demo-rule-1").isSuccess());
+        assertFalse(fixture.controller.refresh().value().orElseThrow().blockedError().isEmpty());
+
+        fixture.setStaleCache(false);
+        RuleLifecycleModel recovered = fixture.controller.refresh().value().orElseThrow();
+
+        assertTrue(recovered.blockedError().isEmpty());
+        assertTrue(recovered.rule("demo-rule-1").orElseThrow().canPause());
+    }
+
+    @Test
+    public void recheckWaitsForCapabilityRecoveryBeforeClearingConflict() {
+        Fixture fixture = fixture();
+        fixture.controller.refresh();
+        fixture.setCapabilities(
+                new CapabilityEvidence(
+                        "demo-version", Collections.singleton("demo-version"), Collections.emptyMap()));
+        assertFalse(fixture.controller.pause("demo-rule-1").isSuccess());
+        assertFalse(fixture.controller.refresh().value().orElseThrow().blockedError().isEmpty());
+
+        fixture.setCapabilities(CapabilityEvidence.demoComplete());
+        RuleLifecycleModel recovered = fixture.controller.refresh().value().orElseThrow();
+
+        assertTrue(recovered.blockedError().isEmpty());
+        assertTrue(recovered.rule("demo-rule-1").orElseThrow().canPause());
     }
 
     private static Fixture fixture() {
@@ -404,6 +574,20 @@ public final class RuleLifecycleControllerTest {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted while waiting for test gate.", exception);
         }
+    }
+
+    private static void preparePausedAndActiveRules(Fixture fixture) {
+        assertTrue(fixture.controller.pause("demo-rule-1").isSuccess());
+        assertTrue(fixture.controller.resume("demo-rule-2").isSuccess());
+    }
+
+    private static void assertLifecycleActionsDisabled(RuleLifecycleModel model) {
+        assertFalse(model.blockedError().isEmpty());
+        assertFalse(model.rule("demo-rule-1").orElseThrow().canResume());
+        assertFalse(model.rule("demo-rule-2").orElseThrow().canPause());
+        assertFalse(model.rule("demo-rule-1").orElseThrow().canDelete());
+        assertFalse(model.canUndo());
+        assertTrue(model.undoToken().isPresent());
     }
 
     private static final class Fixture {
@@ -496,6 +680,74 @@ public final class RuleLifecycleControllerTest {
                 }
             }
             gateway.replaceSnapshot(gateway.snapshot().withRules(rules));
+        }
+
+        private void removeTarget(String targetDeviceId) {
+            RuleStoreSnapshot current = gateway.snapshot();
+            NotificationFlowSnapshot flow = current.flowSnapshot();
+            List<TargetDevice> targets = new ArrayList<>();
+            for (TargetDevice target : flow.targets()) {
+                if (!target.deviceId().equals(targetDeviceId)) {
+                    targets.add(target);
+                }
+            }
+            replaceFlow(
+                    new NotificationFlowSnapshot(
+                            flow.connectionState(),
+                            flow.stateVersion() + 1L,
+                            flow.compatibilityUnverified(),
+                            targets,
+                            flow.rules(),
+                            flow.notificationAccess(),
+                            flow.staleCache()),
+                    current.capabilities());
+        }
+
+        private void setStaleCache(boolean staleCache) {
+            RuleStoreSnapshot current = gateway.snapshot();
+            NotificationFlowSnapshot flow = current.flowSnapshot();
+            replaceFlow(
+                    new NotificationFlowSnapshot(
+                            flow.connectionState(),
+                            flow.stateVersion() + 1L,
+                            flow.compatibilityUnverified(),
+                            flow.targets(),
+                            flow.rules(),
+                            flow.notificationAccess(),
+                            staleCache),
+                    current.capabilities());
+        }
+
+        private void setConnectionState(ConnectionState connectionState) {
+            RuleStoreSnapshot current = gateway.snapshot();
+            NotificationFlowSnapshot flow = current.flowSnapshot();
+            replaceFlow(
+                    new NotificationFlowSnapshot(
+                            connectionState,
+                            flow.stateVersion() + 1L,
+                            connectionState == ConnectionState.COMPATIBILITY_UNVERIFIED,
+                            flow.targets(),
+                            flow.rules(),
+                            flow.notificationAccess(),
+                            flow.staleCache()),
+                    current.capabilities());
+        }
+
+        private void setCapabilities(CapabilityEvidence capabilities) {
+            RuleStoreSnapshot current = gateway.snapshot();
+            replaceFlow(current.flowSnapshot(), capabilities);
+        }
+
+        private void replaceFlow(
+                NotificationFlowSnapshot flow, CapabilityEvidence capabilities) {
+            RuleStoreSnapshot current = gateway.snapshot();
+            gateway.replaceSnapshot(
+                    new RuleStoreSnapshot(
+                            flow,
+                            current.sourceDevice(),
+                            capabilities,
+                            current.unknownFieldsPresent(),
+                            current.unexpressibleDslPresent()));
         }
     }
 }

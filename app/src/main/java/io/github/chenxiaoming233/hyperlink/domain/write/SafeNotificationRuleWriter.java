@@ -329,9 +329,17 @@ public final class SafeNotificationRuleWriter {
         if (target == null) {
             return ServiceResult.failure("规则目标不在当前快照中，未执行任何写入。");
         }
+        if (flow.notificationAccess() != NotificationAccessState.GRANTED) {
+            return ServiceResult.failure(
+                    "系统通知使用权未满足，未执行任何生命周期写入。");
+        }
         if (target.targetAuthorized() != expectedTargetAuthorized) {
             return ServiceResult.failure(
                     "目标授权已在外部变化，未执行任何写入；不会自动重新授权或覆盖外部变化。");
+        }
+        if (!target.targetAuthorized()) {
+            return ServiceResult.failure(
+                    "目标尚未授权，未执行任何生命周期写入。");
         }
         if (!delete && !expectedStatus.equals(currentRule.status())) {
             return ServiceResult.failure("规则状态已被外部修改，未执行任何写入。");

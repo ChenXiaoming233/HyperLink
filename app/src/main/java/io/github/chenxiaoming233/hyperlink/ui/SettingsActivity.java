@@ -7,6 +7,7 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.AdapterView;
@@ -19,9 +20,20 @@ import android.widget.TextView;
 import io.github.chenxiaoming233.hyperlink.domain.ConnectionState;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationAccessState;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationFlowSnapshot;
+import io.github.chenxiaoming233.hyperlink.domain.NotificationRule;
 import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
+import io.github.chenxiaoming233.hyperlink.domain.lifecycle.RuleLifecycleController;
 import io.github.chenxiaoming233.hyperlink.domain.lifecycle.NotificationAccessSettingsIntentSpec;
+import io.github.chenxiaoming233.hyperlink.domain.write.CapabilityEvidence;
+import io.github.chenxiaoming233.hyperlink.domain.write.RuleStoreSnapshot;
+import io.github.chenxiaoming233.hyperlink.domain.write.SafeNotificationRuleWriter;
+import io.github.chenxiaoming233.hyperlink.domain.write.SourceDevice;
+import io.github.chenxiaoming233.hyperlink.fake.FakeLastKnownGoodStore;
 import io.github.chenxiaoming233.hyperlink.fake.FakeNotificationFlowService;
+import io.github.chenxiaoming233.hyperlink.fake.FakeRuleStoreGateway;
+import io.github.chenxiaoming233.hyperlink.fake.FakeTargetPermissionGateway;
+import java.util.Collections;
+import java.util.List;
 
 public final class SettingsActivity extends Activity {
     private static final String[] SCENARIOS = {
@@ -45,12 +57,44 @@ public final class SettingsActivity extends Activity {
     private Spinner scenarioSelector;
     private LinearLayout targetContainer;
     private LinearLayout ruleContainer;
-    private LinearLayout editorContainer;
+    private FakeRuleStoreGateway sharedGateway;
+    private SafeNotificationRuleWriter sharedWriter;
+    private RuleLifecycleController lifecycleController;
+    private RuleEditorPanel editorPanel;
+    private NotificationFlowSnapshot baseSnapshot;
+    private int appliedScenario = -1;
+    private ConnectionState appliedConnectionState;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        initializeSharedStore();
         setContentView(createContent());
+    }
+
+    private void initializeSharedStore() {
+        baseSnapshot =
+                FakeNotificationFlowService.demoSnapshot(ConnectionState.CONNECTED);
+        SourceDevice source =
+                new SourceDevice("demo-source-phone", "Demo-Phone");
+        sharedGateway =
+                new FakeRuleStoreGateway(
+                        new RuleStoreSnapshot(
+                                baseSnapshot,
+                                source,
+                                CapabilityEvidence.demoComplete(),
+                                false,
+                                false));
+        sharedWriter =
+                new SafeNotificationRuleWriter(
+                        sharedGateway, new FakeLastKnownGoodStore());
+        lifecycleController =
+                new RuleLifecycleController(
+                        sharedGateway,
+                        sharedWriter,
+                        new FakeTargetPermissionGateway(sharedGateway),
+                        SystemClock::elapsedRealtime,
+                        10_000L);
     }
 
     private View createContent() {
@@ -178,11 +222,16 @@ public final class SettingsActivity extends Activity {
                 view -> openNotificationAccessSettings());
         page.addView(notificationAccessSettingsButton);
 
-        editorContainer = new LinearLayout(this);
-        editorContainer.setOrientation(LinearLayout.VERTICAL);
+        editorPanel =
+                new RuleEditorPanel(
+                        this,
+                        sharedGateway,
+                        sharedWriter,
+                        lifecycleController,
+                        this::refreshPageFromSharedStore);
         LinearLayout.LayoutParams editorParams = matchWrap();
         editorParams.topMargin = dp(28);
-        page.addView(editorContainer, editorParams);
+        page.addView(editorPanel, editorParams);
 
         TextView targetHeading = sectionHeading("目标设备");
         targetHeading.setPadding(0, dp(28), 0, dp(4));
@@ -229,42 +278,72 @@ public final class SettingsActivity extends Activity {
     }
 
     private void render() {
-        FakeNotificationFlowService service = createFakeService();
-        ServiceResult<NotificationFlowSnapshot> result = service.readSnapshot();
-        if (!result.isSuccess()) {
-            PanelDisplayModel failure = PanelStateMapper.mapFailure(result.userMessage());
+        if (scenarioSelector.getSelectedItemPosition() == 3) {
+            PanelDisplayModel failure =
+                    PanelStateMapper.mapFailure(
+                            "演示读取失败，未接触真实 VoiceAssist 数据，请稍后重试。");
             renderModel(failure, null);
             return;
         }
+        applyScenarioToSharedStore();
+        refreshPageFromSharedStore();
+        if (editorPanel != null) {
+            editorPanel.refreshFromStore();
+        }
+    }
 
-        NotificationFlowSnapshot snapshot = result.value().get();
+    private void refreshPageFromSharedStore() {
+        ServiceResult<RuleStoreSnapshot> result = sharedGateway.read();
+        if (!result.isSuccess()) {
+            renderModel(
+                    PanelStateMapper.mapFailure("无法读取共享 fake store。"), null);
+            return;
+        }
+        NotificationFlowSnapshot snapshot = result.value().orElseThrow().flowSnapshot();
         renderModel(PanelStateMapper.map(snapshot), snapshot);
     }
 
-    private FakeNotificationFlowService createFakeService() {
+    private void applyScenarioToSharedStore() {
+        int scenario = scenarioSelector.getSelectedItemPosition();
         ConnectionState state = selectedState();
-        switch (scenarioSelector.getSelectedItemPosition()) {
-            case 1:
-                return new FakeNotificationFlowService(
-                        FakeNotificationFlowService.staleDemoSnapshot(state));
-            case 2:
-                return new FakeNotificationFlowService(
-                        FakeNotificationFlowService.emptySnapshot(state));
-            case 3:
-                return FakeNotificationFlowService.failing(
-                        "演示读取失败，未接触真实 VoiceAssist 数据，请稍后重试。");
-            case 4:
-                return new FakeNotificationFlowService(
-                        FakeNotificationFlowService.demoSnapshot(state)
-                                .withNotificationAccess(NotificationAccessState.MISSING));
-            case 5:
-                return new FakeNotificationFlowService(
-                        FakeNotificationFlowService.demoSnapshot(state)
-                                .withNotificationAccess(NotificationAccessState.REVOKED));
-            default:
-                return new FakeNotificationFlowService(
-                        FakeNotificationFlowService.demoSnapshot(state));
+        if (scenario == appliedScenario && state == appliedConnectionState) {
+            return;
         }
+        RuleStoreSnapshot current = sharedGateway.snapshot();
+        NotificationFlowSnapshot flow = current.flowSnapshot();
+        boolean stale = scenario == 1;
+        NotificationAccessState access = NotificationAccessState.GRANTED;
+        if (scenario == 4) {
+            access = NotificationAccessState.MISSING;
+        } else if (scenario == 5) {
+            access = NotificationAccessState.REVOKED;
+        }
+        List<NotificationRule> rules = flow.rules();
+        if (scenario == 2 && sharedGateway.writeCount() == 0) {
+            rules = Collections.emptyList();
+        } else if (scenario != 2
+                && rules.isEmpty()
+                && sharedGateway.writeCount() == 0) {
+            rules = baseSnapshot.rules();
+        }
+        NotificationFlowSnapshot nextFlow =
+                new NotificationFlowSnapshot(
+                        state,
+                        flow.stateVersion() + 1L,
+                        state == ConnectionState.COMPATIBILITY_UNVERIFIED,
+                        flow.targets(),
+                        rules,
+                        access,
+                        stale);
+        sharedGateway.replaceSnapshot(
+                new RuleStoreSnapshot(
+                        nextFlow,
+                        current.sourceDevice(),
+                        current.capabilities(),
+                        current.unknownFieldsPresent(),
+                        current.unexpressibleDslPresent()));
+        appliedScenario = scenario;
+        appliedConnectionState = state;
     }
 
     private void renderModel(PanelDisplayModel model, NotificationFlowSnapshot snapshot) {
@@ -289,13 +368,6 @@ public final class SettingsActivity extends Activity {
                         ? "状态版本：未知 · 只读"
                         : "状态版本：" + snapshot.stateVersion() + " · 只读");
         retryButton.setEnabled(model.retryEnabled());
-        editorContainer.removeAllViews();
-        if (snapshot == null) {
-            editorContainer.addView(
-                    emptySectionText("读取失败：生命周期编辑器不可用，未使用独立快照降级。"));
-        } else {
-            editorContainer.addView(new RuleEditorPanel(this, snapshot), matchWrap());
-        }
 
         targetContainer.removeAllViews();
         for (PanelDisplayModel.TargetItem target : model.targets()) {

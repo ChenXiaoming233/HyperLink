@@ -1,6 +1,7 @@
 package io.github.chenxiaoming233.hyperlink.domain.lifecycle;
 
 import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
+import io.github.chenxiaoming233.hyperlink.domain.NotificationRule;
 import io.github.chenxiaoming233.hyperlink.domain.TargetDevice;
 import io.github.chenxiaoming233.hyperlink.domain.write.RuleMutationResult;
 import io.github.chenxiaoming233.hyperlink.domain.write.RuleStoreGateway;
@@ -20,6 +21,7 @@ public final class RuleLifecycleController {
     private RuleUndoToken lastUndoToken;
     private DeleteConfirmation pendingDelete;
     private String transientBlockedError = "";
+    private String transientConflictRuleId = "";
     private String transientConflictTargetDeviceId = "";
     private boolean transientConflictExpectedAuthorization;
     private RuleLifecycleModel model;
@@ -57,8 +59,7 @@ public final class RuleLifecycleController {
         }
         RuleStoreSnapshot snapshot = readResult.value().orElseThrow();
         if (clearTransientError && conflictResolved(snapshot)) {
-            transientBlockedError = "";
-            transientConflictTargetDeviceId = "";
+            clearTransientConflict();
         }
         model =
                 RuleLifecycleModel.from(
@@ -109,6 +110,7 @@ public final class RuleLifecycleController {
         if (!result.isSuccess()) {
             return blocked(
                     result.userMessage(),
+                    token.ruleId(),
                     token.targetDeviceId(),
                     token.targetAuthorized());
         }
@@ -177,6 +179,7 @@ public final class RuleLifecycleController {
         if (!deleted.isSuccess()) {
             return blocked(
                     deleted.userMessage(),
+                    confirmation.ruleId(),
                     confirmation.targetDeviceId(),
                     confirmation.expectedTargetAuthorized());
         }
@@ -194,6 +197,7 @@ public final class RuleLifecycleController {
             }
             return blocked(
                     message,
+                    confirmation.ruleId(),
                     confirmation.targetDeviceId(),
                     confirmation.expectedTargetAuthorized());
         }
@@ -223,6 +227,7 @@ public final class RuleLifecycleController {
             lastUndoToken = null;
             return blocked(
                     message,
+                    confirmation.ruleId(),
                     confirmation.targetDeviceId(),
                     confirmation.expectedTargetAuthorized());
         }
@@ -253,6 +258,7 @@ public final class RuleLifecycleController {
         if (!result.isSuccess()) {
             return blocked(
                     result.userMessage(),
+                    ruleId,
                     rule.targetDeviceId(),
                     rule.targetAuthorized());
         }
@@ -274,8 +280,12 @@ public final class RuleLifecycleController {
     }
 
     private ServiceResult<RuleLifecycleModel> blocked(
-            String message, String targetDeviceId, boolean expectedAuthorization) {
+            String message,
+            String ruleId,
+            String targetDeviceId,
+            boolean expectedAuthorization) {
         transientBlockedError = Objects.requireNonNull(message, "message");
+        transientConflictRuleId = Objects.requireNonNull(ruleId, "ruleId");
         transientConflictTargetDeviceId =
                 Objects.requireNonNull(targetDeviceId, "targetDeviceId");
         transientConflictExpectedAuthorization = expectedAuthorization;
@@ -288,11 +298,22 @@ public final class RuleLifecycleController {
     }
 
     private boolean conflictResolved(RuleStoreSnapshot snapshot) {
-        if (!snapshot.readOnlyFaultMessage().isEmpty()) {
+        if (!RuleLifecycleModel.writeBlockedReason(snapshot, "").isEmpty()) {
             return false;
         }
-        if (transientConflictTargetDeviceId.isEmpty()) {
+        if (transientConflictRuleId.isEmpty()) {
             return true;
+        }
+        NotificationRule rule = null;
+        for (NotificationRule candidate : snapshot.rules()) {
+            if (candidate.ruleId().equals(transientConflictRuleId)) {
+                rule = candidate;
+                break;
+            }
+        }
+        if (rule == null
+                || !rule.targetDeviceId().equals(transientConflictTargetDeviceId)) {
+            return false;
         }
         for (TargetDevice target : snapshot.flowSnapshot().targets()) {
             if (target.deviceId().equals(transientConflictTargetDeviceId)) {
@@ -300,11 +321,12 @@ public final class RuleLifecycleController {
                         == transientConflictExpectedAuthorization;
             }
         }
-        return true;
+        return false;
     }
 
     private void clearTransientConflict() {
         transientBlockedError = "";
+        transientConflictRuleId = "";
         transientConflictTargetDeviceId = "";
     }
 }

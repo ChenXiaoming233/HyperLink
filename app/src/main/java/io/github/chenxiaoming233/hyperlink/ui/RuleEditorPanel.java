@@ -5,7 +5,6 @@ import android.app.AlertDialog;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
-import android.os.SystemClock;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
@@ -34,19 +33,15 @@ import io.github.chenxiaoming233.hyperlink.domain.lifecycle.DeleteConfirmation;
 import io.github.chenxiaoming233.hyperlink.domain.lifecycle.RuleLifecycleController;
 import io.github.chenxiaoming233.hyperlink.domain.lifecycle.RuleLifecycleModel;
 import io.github.chenxiaoming233.hyperlink.domain.lifecycle.RuleUndoToken;
-import io.github.chenxiaoming233.hyperlink.domain.write.CapabilityEvidence;
 import io.github.chenxiaoming233.hyperlink.domain.write.ConfirmedTargetSelection;
 import io.github.chenxiaoming233.hyperlink.domain.write.RuleCreationResult;
-import io.github.chenxiaoming233.hyperlink.domain.write.RuleStoreSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.write.SafeNotificationRuleWriter;
 import io.github.chenxiaoming233.hyperlink.domain.write.SourceDevice;
 import io.github.chenxiaoming233.hyperlink.domain.write.StructuredRuleDsl;
 import io.github.chenxiaoming233.hyperlink.domain.write.TargetSelection;
 import io.github.chenxiaoming233.hyperlink.domain.write.TargetSelectionFlow;
 import io.github.chenxiaoming233.hyperlink.fake.FakeAppCatalog;
-import io.github.chenxiaoming233.hyperlink.fake.FakeLastKnownGoodStore;
 import io.github.chenxiaoming233.hyperlink.fake.FakeRuleStoreGateway;
-import io.github.chenxiaoming233.hyperlink.fake.FakeTargetPermissionGateway;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -55,15 +50,15 @@ import java.util.Set;
 
 final class RuleEditorPanel extends LinearLayout {
     private final Activity activity;
-    private final NotificationFlowSnapshot snapshot;
-    private final SourceDevice source;
-    private final List<TargetDevice> targets;
+    private SourceDevice source;
+    private List<TargetDevice> targets;
     private final FakeAppCatalog appCatalog;
     private final List<AppCatalogEntry> catalogApps;
     private final FakeRuleStoreGateway gateway;
     private final SafeNotificationRuleWriter writer;
     private final RuleLifecycleController lifecycleController;
-    private final TargetSelectionFlow targetSelectionFlow;
+    private final Runnable storeChangedListener;
+    private TargetSelectionFlow targetSelectionFlow;
     private final Set<RulePreset> selectedPresets = new LinkedHashSet<>();
     private final List<CheckBox> presetChecks = new ArrayList<>();
 
@@ -84,31 +79,25 @@ final class RuleEditorPanel extends LinearLayout {
     private TextView statusView;
     private RuleUndoToken undoToken;
 
-    RuleEditorPanel(Activity activity, NotificationFlowSnapshot snapshot) {
+    RuleEditorPanel(
+            Activity activity,
+            FakeRuleStoreGateway gateway,
+            SafeNotificationRuleWriter writer,
+            RuleLifecycleController lifecycleController,
+            Runnable storeChangedListener) {
         super(activity);
         this.activity = activity;
-        this.snapshot = Objects.requireNonNull(snapshot, "snapshot");
+        this.gateway = Objects.requireNonNull(gateway, "gateway");
+        this.writer = Objects.requireNonNull(writer, "writer");
+        this.lifecycleController =
+                Objects.requireNonNull(lifecycleController, "lifecycleController");
+        this.storeChangedListener =
+                Objects.requireNonNull(storeChangedListener, "storeChangedListener");
+        NotificationFlowSnapshot snapshot = gateway.snapshot().flowSnapshot();
         this.source = sourceFrom(snapshot);
         this.targets = receivableTargets(snapshot);
         this.appCatalog = FakeAppCatalog.demo();
         this.catalogApps = readCatalog(appCatalog);
-        this.gateway =
-                new FakeRuleStoreGateway(
-                        new RuleStoreSnapshot(
-                                snapshot,
-                                source,
-                                CapabilityEvidence.demoComplete(),
-                                false,
-                                false));
-        this.writer =
-                new SafeNotificationRuleWriter(gateway, new FakeLastKnownGoodStore());
-        this.lifecycleController =
-                new RuleLifecycleController(
-                        gateway,
-                        writer,
-                        new FakeTargetPermissionGateway(gateway),
-                        SystemClock::elapsedRealtime,
-                        10_000L);
         this.targetSelectionFlow = new TargetSelectionFlow(snapshot);
         this.draft = StructuredRuleDraft.empty(System.currentTimeMillis());
         this.selectedTargetId = targets.isEmpty() ? "" : targets.get(0).deviceId();
@@ -746,6 +735,7 @@ final class RuleEditorPanel extends LinearLayout {
         refreshStructure();
         refreshApps();
         refreshExistingRules();
+        notifyStoreChanged();
         setStatus(RuleSaveFeedback.from(saved, creationResult.notes()).displayText());
     }
 
@@ -795,6 +785,42 @@ final class RuleEditorPanel extends LinearLayout {
         }
     }
 
+    void refreshFromStore() {
+        NotificationFlowSnapshot snapshot = gateway.snapshot().flowSnapshot();
+        source = sourceFrom(snapshot);
+        targets = receivableTargets(snapshot);
+        targetSelectionFlow = new TargetSelectionFlow(snapshot);
+        refreshTargetSelector();
+        refreshExistingRules();
+    }
+
+    private void refreshTargetSelector() {
+        if (targetSelector == null) {
+            return;
+        }
+        List<String> targetLabels = new ArrayList<>();
+        int selectedIndex = -1;
+        for (int index = 0; index < targets.size(); index++) {
+            TargetDevice target = targets.get(index);
+            targetLabels.add(target.displayName() + " · " + target.deviceId());
+            if (target.deviceId().equals(selectedTargetId)) {
+                selectedIndex = index;
+            }
+        }
+        targetSelector.setAdapter(
+                new ArrayAdapter<>(
+                        activity,
+                        android.R.layout.simple_spinner_dropdown_item,
+                        targetLabels));
+        if (selectedIndex < 0 && !targets.isEmpty()) {
+            selectedIndex = 0;
+            selectedTargetId = targets.get(0).deviceId();
+        }
+        if (selectedIndex >= 0) {
+            targetSelector.setSelection(selectedIndex);
+        }
+    }
+
     private void refreshExistingRules() {
         if (existingRulesContainer == null) {
             return;
@@ -807,7 +833,7 @@ final class RuleEditorPanel extends LinearLayout {
             return;
         }
         RuleLifecycleModel model = refreshed.value().orElseThrow();
-        undoToken = model.undoToken().orElse(null);
+        undoToken = model.canUndo() ? model.undoToken().orElse(null) : null;
         if (!model.blockedError().isEmpty()) {
             existingRulesContainer.addView(
                     text(model.blockedError(), 14, Color.rgb(156, 50, 35)));
@@ -902,11 +928,14 @@ final class RuleEditorPanel extends LinearLayout {
             ServiceResult<RuleLifecycleModel> result, String successMessage) {
         refreshExistingRules();
         if (!result.isSuccess()) {
+            notifyStoreChanged();
             setStatus(result.userMessage());
             return;
         }
-        undoToken = result.value().orElseThrow().undoToken().orElse(null);
+        RuleLifecycleModel model = result.value().orElseThrow();
+        undoToken = model.canUndo() ? model.undoToken().orElse(null) : null;
         refreshExistingRules();
+        notifyStoreChanged();
         setStatus(successMessage);
     }
 
@@ -934,6 +963,9 @@ final class RuleEditorPanel extends LinearLayout {
         ServiceResult<RuleLifecycleModel> result =
                 lifecycleController.confirmDelete(confirmation, confirmed);
         refreshExistingRules();
+        if (confirmed) {
+            notifyStoreChanged();
+        }
         if (!result.isSuccess()) {
             setStatus(result.userMessage());
         } else if (!confirmed) {
@@ -943,6 +975,10 @@ final class RuleEditorPanel extends LinearLayout {
                     "规则已删除，并已通过 fake 权限 gateway 撤销目标授权；"
                             + "未连接真实系统授权 API。");
         }
+    }
+
+    private void notifyStoreChanged() {
+        storeChangedListener.run();
     }
 
     private NotificationRule findStoredRule(String ruleId) {

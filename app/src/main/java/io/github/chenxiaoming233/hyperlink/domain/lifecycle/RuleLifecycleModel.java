@@ -1,8 +1,12 @@
 package io.github.chenxiaoming233.hyperlink.domain.lifecycle;
 
+import io.github.chenxiaoming233.hyperlink.domain.ConnectionState;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationAccessState;
+import io.github.chenxiaoming233.hyperlink.domain.NotificationFlowSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationRule;
 import io.github.chenxiaoming233.hyperlink.domain.TargetDevice;
+import io.github.chenxiaoming233.hyperlink.domain.write.CapabilityProbe;
+import io.github.chenxiaoming233.hyperlink.domain.write.CapabilityReport;
 import io.github.chenxiaoming233.hyperlink.domain.write.RuleStoreSnapshot;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -16,19 +20,22 @@ public final class RuleLifecycleModel {
     private final List<RuleItem> rules;
     private final RuleUndoToken undoToken;
     private final NotificationAccessSettingsIntentSpec settingsIntent;
+    private final boolean canUndo;
 
     private RuleLifecycleModel(
             NotificationAccessState notificationAccess,
             String blockedError,
             List<RuleItem> rules,
             RuleUndoToken undoToken,
-            NotificationAccessSettingsIntentSpec settingsIntent) {
+            NotificationAccessSettingsIntentSpec settingsIntent,
+            boolean canUndo) {
         this.notificationAccess =
                 Objects.requireNonNull(notificationAccess, "notificationAccess");
         this.blockedError = Objects.requireNonNull(blockedError, "blockedError");
         this.rules = immutableRules(rules);
         this.undoToken = undoToken;
         this.settingsIntent = settingsIntent;
+        this.canUndo = canUndo;
     }
 
     static RuleLifecycleModel from(
@@ -37,20 +44,26 @@ public final class RuleLifecycleModel {
             String transientBlockedError) {
         Objects.requireNonNull(snapshot, "snapshot");
         String blockedError =
-                snapshot.readOnlyFaultMessage().isEmpty()
-                        ? Objects.requireNonNull(transientBlockedError, "transientBlockedError")
-                        : snapshot.readOnlyFaultMessage();
+                writeBlockedReason(
+                        snapshot,
+                        Objects.requireNonNull(transientBlockedError, "transientBlockedError"));
+        boolean writable = blockedError.isEmpty();
         NotificationAccessState access = snapshot.flowSnapshot().notificationAccess();
         List<RuleItem> items = new ArrayList<>();
         for (NotificationRule rule : snapshot.rules()) {
             TargetDevice target = findTarget(snapshot, rule.targetDeviceId());
-            items.add(RuleItem.from(rule, target, access, !blockedError.isEmpty()));
+            items.add(RuleItem.from(rule, target, access, writable));
         }
         NotificationAccessSettingsIntentSpec settingsIntent =
                 access == NotificationAccessState.GRANTED
                         ? null
                         : NotificationAccessSettingsIntentSpec.systemSettings();
-        return new RuleLifecycleModel(access, blockedError, items, undoToken, settingsIntent);
+        boolean canUndo =
+                writable
+                        && undoToken != null
+                        && undoCanReachCurrentRule(snapshot, undoToken);
+        return new RuleLifecycleModel(
+                access, blockedError, items, undoToken, settingsIntent, canUndo);
     }
 
     public NotificationAccessState notificationAccess() {
@@ -67,6 +80,10 @@ public final class RuleLifecycleModel {
 
     public Optional<RuleUndoToken> undoToken() {
         return Optional.ofNullable(undoToken);
+    }
+
+    public boolean canUndo() {
+        return canUndo;
     }
 
     public Optional<NotificationAccessSettingsIntentSpec> notificationAccessSettingsIntent() {
@@ -124,7 +141,7 @@ public final class RuleLifecycleModel {
                 NotificationRule rule,
                 TargetDevice target,
                 NotificationAccessState access,
-                boolean globalBlocked) {
+                boolean writable) {
             boolean active = "active".equals(rule.status());
             boolean paused = "paused".equals(rule.status());
             boolean targetAuthorized = target != null && target.targetAuthorized();
@@ -150,7 +167,6 @@ public final class RuleLifecycleModel {
             } else {
                 displayStatus = rule.status();
             }
-            boolean actionsAvailable = !globalBlocked;
             return new RuleItem(
                     rule.ruleId(),
                     rule.status(),
@@ -160,9 +176,9 @@ public final class RuleLifecycleModel {
                     targetAuthorized,
                     blocked,
                     blockedMessage,
-                    actionsAvailable && active && !blocked,
-                    actionsAvailable && paused && target != null && targetAuthorized,
-                    actionsAvailable && target != null);
+                    writable && active && !blocked,
+                    writable && paused && target != null && targetAuthorized,
+                    writable && target != null && targetAuthorized);
         }
 
         public String ruleId() {
@@ -217,6 +233,57 @@ public final class RuleLifecycleModel {
             }
         }
         return null;
+    }
+
+    static String writeBlockedReason(
+            RuleStoreSnapshot snapshot, String transientBlockedError) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        Objects.requireNonNull(transientBlockedError, "transientBlockedError");
+        if (!snapshot.readOnlyFaultMessage().isEmpty()) {
+            return snapshot.readOnlyFaultMessage();
+        }
+        if (!transientBlockedError.isEmpty()) {
+            return transientBlockedError;
+        }
+        NotificationFlowSnapshot flow = snapshot.flowSnapshot();
+        if (flow.staleCache()) {
+            return "缓存快照已过期，生命周期写操作已禁用。";
+        }
+        if (flow.connectionState() != ConnectionState.CONNECTED
+                && flow.connectionState() != ConnectionState.COMPATIBILITY_UNVERIFIED) {
+            return "当前连接状态不允许写入，生命周期写操作已禁用。";
+        }
+        CapabilityReport capability = CapabilityProbe.evaluate(snapshot.capabilities());
+        if (!capability.passed()) {
+            return capability.readOnlyMessage();
+        }
+        String snapshotIssue = snapshot.writeSafetyIssue();
+        if (!snapshotIssue.isEmpty()) {
+            return snapshotIssue;
+        }
+        if (flow.notificationAccess() != NotificationAccessState.GRANTED) {
+            return "系统通知使用权未满足，生命周期写操作已禁用。";
+        }
+        return "";
+    }
+
+    private static boolean undoCanReachCurrentRule(
+            RuleStoreSnapshot snapshot, RuleUndoToken token) {
+        NotificationRule rule = null;
+        for (NotificationRule candidate : snapshot.rules()) {
+            if (candidate.ruleId().equals(token.ruleId())) {
+                rule = candidate;
+                break;
+            }
+        }
+        if (rule == null
+                || !rule.targetDeviceId().equals(token.targetDeviceId())
+                || !rule.status().equals(token.nextStatus())) {
+            return false;
+        }
+        TargetDevice target = findTarget(snapshot, rule.targetDeviceId());
+        return target != null
+                && target.targetAuthorized() == token.targetAuthorized();
     }
 
     private static List<RuleItem> immutableRules(List<RuleItem> values) {
