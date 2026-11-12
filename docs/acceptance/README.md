@@ -31,6 +31,10 @@ bash scripts/acceptance/preflight-device.sh
 `ANDROID_SERIAL` 只作为本机环境变量使用，不写入仓库或证据模板。签名 SHA-256 必须取自
 发布审批记录；脚本不会拉取、复制或反编译厂商 APK。
 
+预检要求 `adb devices` 中恰好一台 online 设备且序列号匹配。若设备侧 `dumpsys` 无法提供可
+计算的明确证书字节，脚本输出 `SIGNATURE_VERIFICATION=UNVERIFIED` 并以非零退出；人工审批
+记录不能把该状态改写成通过。
+
 ## 可发现文件
 
 - [14 项验收矩阵](matrix.md)（`docs/acceptance/matrix.md`）：逐项对应 Issue #10 前 14 条功能验收。
@@ -38,6 +42,7 @@ bash scripts/acceptance/preflight-device.sh
 - [证据模板](evidence-template.md)：归档字段、脱敏规则和目录结构。
 - `scripts/acceptance/preflight-device.sh`：设备侧只读元数据与哈希采集。
 - `scripts/acceptance/verify-forward-attempt.sh`：仅从标准输入验证一次转发尝试。
+- `scripts/acceptance/test-acceptance-kit.sh`：不依赖设备的校验器与 fake adb 行为测试。
 
 ## 执行顺序
 

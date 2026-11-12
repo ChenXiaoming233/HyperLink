@@ -4,9 +4,10 @@
 
 ## PF 只读预检
 
-预检脚本使用 `adb get-state` fail-fast，只接受已连接的单台设备，并要求 shell UID 为 0。
-它只打印设备与包元数据、进程、UID、SELinux、私有文件 `stat` 和 SHA-256，不读取或输出
-规则内容，也不复制 APK。
+预检脚本先枚举 `adb devices`，要求恰好一台状态为 `device` 的设备，且其序列号与
+`ANDROID_SERIAL` 完全一致。离线、未授权或多设备状态均 fail-fast。脚本还要求 shell UID
+为 0，并显式检查 VoiceAssist 与 MiLink PID 非空。它只打印设备与包元数据、进程、UID、
+SELinux、私有文件 `stat` 和 SHA-256，不读取或输出规则内容，也不复制 APK。
 
 ```bash
 HYPERLINK_ACCEPTANCE_DEVICE_OK=1 \
@@ -20,16 +21,25 @@ bash scripts/acceptance/preflight-device.sh
 
 - `ro.product.model`、Android release、SDK、build fingerprint。
 - `com.miui.voiceassist` 与 `com.milink.service` 的 versionName、versionCode、UID 和 APK SHA-256。
-- 两个目标进程 PID 与 `getenforce`，非 `Enforcing` 时直接失败。
+- 两个目标进程 PID 与 `getenforce`；任一 PID 为空或非 `Enforcing` 时直接失败。
 - `notification-subscriptions.json` 与 `notification-forward-permissions.json` 的存在性、大小、
   修改时间、权限、属主及 SHA-256。
 
 Android `dumpsys package` 的 `PackageSignatures` 内部摘要不是证书 SHA-256，不能拿它冒充
-签名指纹。脚本要求执行人提供发布审批记录中的 `VOICEASSIST_SIGNER_SHA256` 和
-`MILINK_SIGNER_SHA256`，并同时打印设备签名元数据供人工比对。缺少任一预登记值、取值不是
-64 位十六进制、包未安装、进程未运行、私有文件不可访问或哈希命令不可用时，预检失败退出。
-为遵守“不复制厂商 APK”，脚本不从设备拉取 APK；若无法取得发布审批记录，相关验收项为
-`BLOCKED`，不得用未知摘要继续。
+签名指纹。脚本先要求 `VOICEASSIST_SIGNER_SHA256` 和 `MILINK_SIGNER_SHA256` 均存在且为
+64 位十六进制，缺失时在任何设备命令前 fail-fast。
+
+若 `dumpsys` 明确提供 `certificateHex=` 或 `signingCertificate=` 证书字节，脚本在本地计算
+SHA-256 并与预登记值比较，输出 `SIGNATURE_VERIFICATION=VERIFIED` 或
+`SIGNATURE_VERIFICATION=MISMATCH`。若无法提取明确证书字节、本地缺少转换工具或无法比较，
+脚本输出 `SIGNATURE_VERIFICATION=UNVERIFIED` 并以非零退出，不会输出最终 PASS。
+
+无需复制 APK 的人工审批证据路径：
+
+1. 发布审批记录提供审批人确认的 APK SHA-256 和证书 SHA-256，并绑定包名与版本。
+2. 预检输出设备侧 APK SHA-256、签名元数据和本地实际证书 SHA-256，供审批人与记录逐项核对。
+3. 没有可提取证书字节时，人工审批不能把脚本的 `UNVERIFIED` 改写成通过；该验收项标记
+   `BLOCKED`。禁止为补齐证据而拉取、复制、反编译厂商 APK。
 
 ## 受控通知测试
 
@@ -38,11 +48,13 @@ Android `dumpsys package` 的 `PackageSignatures` 内部摘要不是证书 SHA-2
 真实接线必须只在一次实际 A2A 投递开始时写一条不含敏感内容的标记：
 
 ```text
-HyperLinkAcceptance event=forward_attempt forwardId=<不透明ID> attempt=<正整数>
+HyperLinkAcceptance event=forward_attempt runId=<本次唯一不透明ID> timestampEpoch=<Unix秒> forwardId=<通知唯一不透明ID> attempt=<正整数>
 ```
 
 - 载入规则、渲染 UI、预览、排队和普通状态变化不得写该标记。
-- `forwardId` 代表一次用户可见的逻辑投递；同一逻辑投递只允许一个值。
+- `runId` 每次验收运行重新生成且不复用；历史日志通过 `runId` 或 `timestampEpoch` 排除。
+- `timestampEpoch` 在真实 A2A 投递开始时生成，用于 `--since` 过滤历史日志。
+- `forwardId` 代表一次用户可见的逻辑投递；同一逻辑投递只允许一个值和一个 attempt 标记。
 - `attempt` 从 1 开始，只有实际发生额外投递时才递增，不得用 UI 重试次数替代。
 - 标记不得包含通知正文、应用名、包名、账号、设备标识或 `ruleId`。
 - 如果真实接线尚未实现该标记，`ACC-14` 标记 `BLOCKED`，不得凭截图猜测通过。
@@ -55,21 +67,25 @@ HyperLinkAcceptance event=forward_attempt forwardId=<不透明ID> attempt=<正�
 adb logcat -v threadtime | grep --line-buffered 'HyperLinkAcceptance event=forward_attempt'
 ```
 
-测试结束后将同一过滤结果交给仓库校验器。校验器只从标准输入读取，不连接设备：
+测试结束后将同一过滤结果交给仓库校验器。校验器只从标准输入读取，不连接设备，且至少要求
+`--run-id`、`--since`、`--forward-id` 之一：
 
 ```bash
-adb logcat -d -v threadtime | bash scripts/acceptance/verify-forward-attempt.sh
+adb logcat -d -v epoch \
+  | grep 'HyperLinkAcceptance event=forward_attempt' \
+  | bash scripts/acceptance/verify-forward-attempt.sh \
+      --run-id '<本次唯一 runId 占位>' \
+      --since '<本次开始 epoch 占位>' \
+      --forward-id '<预期 forwardId 占位>'
 ```
 
-若需要确认 `forwardId` 与测试记录一致，使用环境变量传入，不在终端输出原值：
+`--run-id`、`--since` 与 `--forward-id` 可同时使用，过滤条件按 AND 组合。输入中的历史标记
+若不属于当前范围会被忽略；当前范围没有任何标记、出现多个标记、同一行重复标记、重复
+`forwardId` 标记或 `attempt=1` 加 `attempt=2` 都会失败。
 
-```bash
-EXPECTED_FORWARD_ID='<测试记录中的不透明ID占位>' \
-bash scripts/acceptance/verify-forward-attempt.sh < filtered-forward.log
-```
-
-校验器只在标记数为 1、唯一 `forwardId` 数为 1、所有 `attempt=1` 时输出 PASS，并只打印
-`forwardId` 的 SHA-256 前缀。归档完整原始日志前必须再做同一过滤与脱敏，禁止归档通知正文。
+校验器按标记出现次数而非行数统计。只有当前范围恰好 1 个标记、唯一 `forwardId`、恰好 1 个
+`attempt` 标记且值为 1 时输出 PASS，并只打印 `runId` 与 `forwardId` 的 SHA-256 前缀。
+归档完整原始日志前必须再做同一过滤与脱敏，禁止归档通知正文。
 
 ## BR 规则与授权备份恢复
 
@@ -98,10 +114,12 @@ bash scripts/acceptance/verify-forward-attempt.sh < filtered-forward.log
 
 以下任一情况立即把当前场景标记为 FAIL 或 ABORTED：
 
-- 预检失败、设备不止一台、SELinux 非 Enforcing、目标进程消失。
+- 预检失败、在线设备不是恰好一台、`ANDROID_SERIAL` 不匹配、SELinux 非 Enforcing、
+  目标进程消失或 PID 为空。
 - 任何工具要求直接写生产 JSON、绕过认证、强制保存或强制删除。
 - 读取失败、哈希不可得、LKG 不可读回、回滚结果无法验证。
-- 受控通知出现多个 `forwardId`、多个标记或任何 `attempt` 大于 1。
+- 受控通知没有当前 run 标记、出现多个标记、多个 `forwardId`、重复 attempt 标记或任何
+  `attempt` 大于 1。
 
 安全退出顺序：
 

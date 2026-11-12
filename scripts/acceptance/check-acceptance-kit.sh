@@ -8,6 +8,8 @@ OPERATIONS_FILE="$ROOT_DIR/docs/acceptance/operations.md"
 README_FILE="$ROOT_DIR/docs/acceptance/README.md"
 PREFLIGHT_FILE="$ROOT_DIR/scripts/acceptance/preflight-device.sh"
 FORWARD_VERIFIER_FILE="$ROOT_DIR/scripts/acceptance/verify-forward-attempt.sh"
+BEHAVIOR_TEST_FILE="$ROOT_DIR/scripts/acceptance/test-acceptance-kit.sh"
+FAKE_ADB_FILE="$ROOT_DIR/scripts/acceptance/test-fixtures/fake-adb"
 
 fail() {
     printf 'FAIL: %s\n' "$*" >&2
@@ -30,6 +32,8 @@ require_file "$OPERATIONS_FILE"
 require_file "$README_FILE"
 require_file "$PREFLIGHT_FILE"
 require_file "$FORWARD_VERIFIER_FILE"
+require_file "$BEHAVIOR_TEST_FILE"
+require_file "$FAKE_ADB_FILE"
 
 for header in \
     '| ID | #10 条目 | 验收目标 | 前置条件 | 操作 | 预期结果 | 证据类型 | 安全恢复步骤 |'
@@ -70,7 +74,15 @@ for text in \
     '证据记录要求' \
     '有且仅有一次转发尝试' \
     'forwardId' \
-    'attempt=1'
+    'attempt=1' \
+    '暂停→恢复' \
+    '必须保存成功' \
+    '从未授权' \
+    '撤销' \
+    'am force-stop com.miui.voiceassist' \
+    '旧 PID' \
+    '新 PID' \
+    '当前 run'
 do
     require_text "$MATRIX_FILE" "$text"
 done
@@ -96,8 +108,10 @@ for pattern in \
     '^- VoiceAssist 版本：`<[^>]+>`' \
     '^- MiLink 版本：`<[^>]+>`' \
     '^- APK SHA-256：`<[^>]+>`' \
+    '^- 签名验证状态：`<[^>]+>`' \
     '^- 证据时间：`<[^>]+>`' \
     '^- 日志归档：`<[^>]+>`' \
+    '^- runId SHA-256 前缀：`<[^>]+>`' \
     '^- 执行人：`<[^>]+>`' \
     '^- 结果：`<[^>]+>`'
 do
@@ -116,7 +130,14 @@ for text in \
     '恢复后哈希' \
     '失败退出' \
     '中止' \
-    '回滚'
+    '回滚' \
+    'SIGNATURE_VERIFICATION=VERIFIED' \
+    'SIGNATURE_VERIFICATION=UNVERIFIED' \
+    '--run-id' \
+    '--since' \
+    '--forward-id' \
+    '按标记出现次数' \
+    '人工审批'
 do
     require_text "$OPERATIONS_FILE" "$text"
 done
@@ -145,8 +166,20 @@ require_text "$PREFLIGHT_FILE" 'getenforce'
 require_text "$PREFLIGHT_FILE" 'notification-subscriptions.json'
 require_text "$PREFLIGHT_FILE" 'notification-forward-permissions.json'
 require_text "$PREFLIGHT_FILE" 'sha256sum'
+require_text "$PREFLIGHT_FILE" 'ADB_BIN="${ADB_BIN:-adb}"'
+require_text "$PREFLIGHT_FILE" 'adb_cmd devices'
+require_text "$PREFLIGHT_FILE" 'exactly one online adb device is required'
+require_text "$PREFLIGHT_FILE" 'ANDROID_SERIAL does not match the online device'
+require_text "$PREFLIGHT_FILE" 'print_package_pid'
+require_text "$PREFLIGHT_FILE" 'process is unavailable'
+require_text "$PREFLIGHT_FILE" 'certificate_hex_from_metadata'
+require_text "$PREFLIGHT_FILE" 'verify_package_signature'
+require_text "$PREFLIGHT_FILE" 'SIGNATURE_VERIFICATION=UNVERIFIED'
+require_text "$PREFLIGHT_FILE" 'SIGNATURE_VERIFICATION=VERIFIED'
+require_text "$PREFLIGHT_FILE" 'read_field_from_dump'
+require_text "$PREFLIGHT_FILE" 'read_signature_metadata'
 
-for script in "$PREFLIGHT_FILE" "$FORWARD_VERIFIER_FILE"; do
+for script in "$PREFLIGHT_FILE" "$FORWARD_VERIFIER_FILE" "$FAKE_ADB_FILE"; do
     for forbidden in \
         'adb pull' \
         'adb push' \
@@ -176,7 +209,7 @@ for script in "$PREFLIGHT_FILE" "$FORWARD_VERIFIER_FILE"; do
         fi
     done
 
-    if grep -Eq '(^|[^&])>{1,2}[^&]' "$script"; then
+    if grep -Eq '(^|[^&])>{1,2}([^&[:space:]=]|[[:space:]]+[^0-9&[:space:]=])' "$script"; then
         fail "${script#"$ROOT_DIR"/} must not redirect output to files"
     fi
 
@@ -185,12 +218,16 @@ for script in "$PREFLIGHT_FILE" "$FORWARD_VERIFIER_FILE"; do
     fi
 done
 
+if grep -Eq '^[[:space:]]*adb[[:space:]]' "$PREFLIGHT_FILE"; then
+    fail "preflight must invoke adb only through the injectable adb_cmd wrapper"
+fi
+
 awk '
-    /^[[:space:]]*adb[[:space:]]/ {
-        if ($0 ~ /^[[:space:]]*adb[[:space:]]+get-state([[:space:]]|$)/) {
+    /^[[:space:]]*adb_cmd[[:space:]]/ {
+        if ($0 ~ /^[[:space:]]*adb_cmd[[:space:]]+(devices|get-state)([[:space:]]|$)/) {
             next
         }
-        if ($0 ~ /^[[:space:]]*adb[[:space:]]+shell[[:space:]]+(id[[:space:]]+-u|getprop|getenforce|pidof|dumpsys[[:space:]]+package|pm[[:space:]]+path|test[[:space:]]+-f|stat|sha256sum|command[[:space:]]+-v[[:space:]]+sha256sum)([[:space:]]|$)/) {
+        if ($0 ~ /^[[:space:]]*adb_cmd[[:space:]]+shell[[:space:]]+(id[[:space:]]+-u|getprop([[:space:]]|$)|getenforce|pidof|dumpsys[[:space:]]+package|pm[[:space:]]+path|test[[:space:]]+-f|stat|sha256sum|command[[:space:]]+-v[[:space:]]+sha256sum)([[:space:]]|$)/) {
             next
         }
         printf "FAIL: unapproved adb command in preflight: %s\n", $0 > "/dev/stderr"
@@ -202,32 +239,39 @@ awk '
 require_text "$FORWARD_VERIFIER_FILE" 'HyperLinkAcceptance event=forward_attempt'
 require_text "$FORWARD_VERIFIER_FILE" 'forwardId'
 require_text "$FORWARD_VERIFIER_FILE" 'attempt='
+require_text "$FORWARD_VERIFIER_FILE" '--run-id'
+require_text "$FORWARD_VERIFIER_FILE" '--since'
+require_text "$FORWARD_VERIFIER_FILE" '--forward-id'
+require_text "$FORWARD_VERIFIER_FILE" 'timestampEpoch'
+require_text "$FORWARD_VERIFIER_FILE" 'split($0, segments, marker)'
+require_text "$FORWARD_VERIFIER_FILE" 'selected != 1'
 if grep -Fq 'adb ' "$FORWARD_VERIFIER_FILE"; then
     fail "forward-attempt verifier must consume stdin and not issue device commands"
 fi
 
-forward_pass="$(printf '%s\n' \
-    'I/HyperLinkAcceptance: HyperLinkAcceptance event=forward_attempt forwardId=self-check-forward-a attempt=1' \
-    | bash "$FORWARD_VERIFIER_FILE")" \
-    || fail "forward-attempt verifier rejected the valid synthetic marker"
-case "$forward_pass" in
-    *'forwardAttempts=1 attempt=1 forwardIdSha256Prefix='*) ;;
-    *) fail "forward-attempt verifier returned an unexpected successful result" ;;
-esac
+for text in \
+    'historical logs outside the current run' \
+    'counted lines instead of marker occurrences' \
+    'duplicate forwardId tokens' \
+    'multiple attempt tokens' \
+    'attempt=1 plus attempt=2' \
+    'without an explicit run scope' \
+    'pid-missing-voiceassist' \
+    'pid-missing-milink' \
+    'signature-unverified' \
+    'multiple-devices' \
+    'serial-mismatch' \
+    'offline-device' \
+    'large-dumpsys'
+do
+    require_text "$BEHAVIOR_TEST_FILE" "$text"
+done
 
-if printf '%s\n%s\n' \
-    'I/HyperLinkAcceptance: HyperLinkAcceptance event=forward_attempt forwardId=self-check-forward-a attempt=1' \
-    'I/HyperLinkAcceptance: HyperLinkAcceptance event=forward_attempt forwardId=self-check-forward-a attempt=1' \
-    | bash "$FORWARD_VERIFIER_FILE" >/dev/null 2>&1
-then
-    fail "forward-attempt verifier accepted duplicate markers"
-fi
+require_text "$FAKE_ADB_FILE" 'certificateHex=01020304'
+require_text "$FAKE_ADB_FILE" 'multiple-devices'
+require_text "$FAKE_ADB_FILE" 'offline-device'
+require_text "$FAKE_ADB_FILE" 'large-dumpsys'
 
-if printf '%s\n' \
-    'I/HyperLinkAcceptance: HyperLinkAcceptance event=forward_attempt forwardId=self-check-forward-a attempt=2' \
-    | bash "$FORWARD_VERIFIER_FILE" >/dev/null 2>&1
-then
-    fail "forward-attempt verifier accepted attempt=2"
-fi
+bash "$BEHAVIOR_TEST_FILE"
 
 printf 'PASS: acceptance kit structure and safety checks\n'
