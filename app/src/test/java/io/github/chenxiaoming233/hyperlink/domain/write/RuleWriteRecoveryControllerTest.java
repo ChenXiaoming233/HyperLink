@@ -5,9 +5,11 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import io.github.chenxiaoming233.hyperlink.domain.ConnectionState;
+import io.github.chenxiaoming233.hyperlink.domain.NotificationAccessState;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationFlowSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationRule;
 import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
+import io.github.chenxiaoming233.hyperlink.domain.TargetDevice;
 import io.github.chenxiaoming233.hyperlink.domain.editor.RulePreset;
 import io.github.chenxiaoming233.hyperlink.domain.editor.StructuredRuleDraft;
 import io.github.chenxiaoming233.hyperlink.fake.FakeLastKnownGoodStore;
@@ -92,6 +94,11 @@ public final class RuleWriteRecoveryControllerTest {
 
         assertFalse(fixture.controller.model().canRetry());
         assertFalse(fixture.controller.model().canRollback());
+        assertFalse(fixture.controller.model().canRedetect());
+        assertFalse(fixture.controller.redetect().isSuccess());
+        assertEquals(
+                RuleRecoveryModel.State.AWAITING_DECISION,
+                fixture.controller.model().state());
         assertFalse(fixture.controller.retry().isSuccess());
         assertEquals(writesBeforeRetry, fixture.gateway.writeCount());
         assertTrue(fixture.controller.model().message().contains("不安全"));
@@ -113,11 +120,81 @@ public final class RuleWriteRecoveryControllerTest {
         assertEquals(RuleRecoveryModel.State.CURRENT_STATE_UNSAFE, model.state());
         assertFalse(model.canRetry());
         assertFalse(model.canRollback());
+        assertFalse(model.canRedetect());
         int writesBeforeRetry = fixture.gateway.writeCount();
 
         assertFalse(fixture.controller.retry().isSuccess());
         assertEquals(writesBeforeRetry, fixture.gateway.writeCount());
         assertSameRules(externalRules, fixture.gateway.currentRules());
+    }
+
+    @Test
+    public void unknownFieldsFirstFailureCanRollbackAndRestoresWriteGate() {
+        assertUnsafeStructureFirstFailureCanRollback(true);
+    }
+
+    @Test
+    public void unexpressibleDslFirstFailureCanRollbackAndRestoresWriteGate() {
+        assertUnsafeStructureFirstFailureCanRollback(false);
+    }
+
+    @Test
+    public void externalTargetChangeIsUnsafeAndNeverOverwritesAuthorization() {
+        Fixture fixture = fixture("demo-version-tested");
+        fixture.gateway.changeTargetAuthorizationAfterNextWrite(
+                "demo-target-a", false);
+
+        assertFalse(
+                fixture.controller
+                        .saveStructuredRule(fixture.selection, fixture.draft)
+                        .isSuccess());
+
+        RuleRecoveryModel model = fixture.controller.model();
+        assertEquals(RuleRecoveryModel.State.CURRENT_STATE_UNSAFE, model.state());
+        int writesBeforeRetry = fixture.gateway.writeCount();
+        assertFalse(fixture.controller.retry().isSuccess());
+        assertEquals(writesBeforeRetry, fixture.gateway.writeCount());
+        assertFalse(targetAuthorized(fixture.gateway, "demo-target-a"));
+    }
+
+    @Test
+    public void externalPermissionChangeIsUnsafeAndNeverOverwritesAccess() {
+        Fixture fixture = fixture("demo-version-tested");
+        fixture.gateway.changeNotificationAccessOnNextWrite(
+                NotificationAccessState.MISSING);
+
+        assertFalse(
+                fixture.controller
+                        .saveStructuredRule(fixture.selection, fixture.draft)
+                        .isSuccess());
+
+        RuleRecoveryModel model = fixture.controller.model();
+        assertEquals(RuleRecoveryModel.State.CURRENT_STATE_UNSAFE, model.state());
+        int writesBeforeRetry = fixture.gateway.writeCount();
+        assertFalse(fixture.controller.retry().isSuccess());
+        assertEquals(writesBeforeRetry, fixture.gateway.writeCount());
+        assertEquals(
+                NotificationAccessState.MISSING,
+                fixture.gateway.snapshot().flowSnapshot().notificationAccess());
+    }
+
+    @Test
+    public void retrySuccessUsesCurrentCompatibilitySnapshot() {
+        Fixture fixture = fixture("demo-version-tested");
+        fixture.gateway.corruptNextWrite();
+        assertFalse(
+                fixture.controller
+                        .saveStructuredRule(fixture.selection, fixture.draft)
+                        .isSuccess());
+        setCapabilityVersion(fixture.gateway, "demo-version-unknown");
+
+        RuleCreationResult retried =
+                fixture.controller.retry().value().orElseThrow();
+
+        assertTrue(retried.compatibilityUnverified());
+        RuleRecoveryModel model = fixture.controller.model();
+        assertTrue(model.compatibilityUnverified());
+        assertTrue(model.message().contains("兼容性未经完整验收"));
     }
 
     @Test
@@ -330,6 +407,60 @@ public final class RuleWriteRecoveryControllerTest {
                         first.dslJson(),
                         first.createdAt()));
         return changed;
+    }
+
+    private static void assertUnsafeStructureFirstFailureCanRollback(
+            boolean unknownFields) {
+        Fixture fixture = fixture("demo-version-tested");
+        List<NotificationRule> original =
+                new ArrayList<>(fixture.gateway.currentRules());
+        if (unknownFields) {
+            fixture.gateway.markUnknownFieldsOnNextWrite();
+        } else {
+            fixture.gateway.markUnexpressibleDslOnNextWrite();
+        }
+
+        assertFalse(
+                fixture.controller
+                        .saveStructuredRule(fixture.selection, fixture.draft)
+                        .isSuccess());
+
+        RuleRecoveryModel failed = fixture.controller.model();
+        assertEquals(RuleRecoveryModel.State.AWAITING_DECISION, failed.state());
+        assertFalse(failed.canRetry());
+        assertTrue(failed.canRollback());
+        assertEquals(1, fixture.lkgStore.saveCount());
+        assertSameRules(original, fixture.lkgStore.load().rules());
+
+        assertTrue(fixture.controller.rollback().isSuccess());
+        assertEquals(
+                RuleRecoveryModel.State.ROLLED_BACK,
+                fixture.controller.model().state());
+        assertSameRules(original, fixture.gateway.currentRules());
+        assertFalse(fixture.controller.hasPendingRecovery());
+        assertTrue(
+                fixture.controller
+                        .saveStructuredRule(fixture.selection, fixture.draft)
+                        .isSuccess());
+    }
+
+    private static void setCapabilityVersion(
+            FakeRuleStoreGateway gateway, String version) {
+        gateway.replaceSnapshot(
+                gateway.snapshot()
+                        .withCapabilities(
+                                CapabilityEvidence.demoComplete(
+                                        version, Set.of("demo-version-tested"))));
+    }
+
+    private static boolean targetAuthorized(
+            FakeRuleStoreGateway gateway, String targetDeviceId) {
+        for (TargetDevice target : gateway.snapshot().flowSnapshot().targets()) {
+            if (target.deviceId().equals(targetDeviceId)) {
+                return target.targetAuthorized();
+            }
+        }
+        throw new AssertionError("Missing target " + targetDeviceId);
     }
 
     private static void assertSameRules(

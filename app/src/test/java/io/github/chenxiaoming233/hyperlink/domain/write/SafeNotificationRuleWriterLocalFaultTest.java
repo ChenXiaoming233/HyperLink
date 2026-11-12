@@ -8,6 +8,8 @@ import io.github.chenxiaoming233.hyperlink.domain.ConnectionState;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationFlowSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationRule;
 import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
+import io.github.chenxiaoming233.hyperlink.domain.editor.RulePreset;
+import io.github.chenxiaoming233.hyperlink.domain.editor.StructuredRuleDraft;
 import io.github.chenxiaoming233.hyperlink.fake.FakeLastKnownGoodStore;
 import io.github.chenxiaoming233.hyperlink.fake.FakeNotificationFlowService;
 import io.github.chenxiaoming233.hyperlink.fake.FakeRuleStoreGateway;
@@ -55,6 +57,55 @@ public final class SafeNotificationRuleWriterLocalFaultTest {
         int writesBefore = delegate.writeCount();
         assertFalse(writer.createAllNotificationsRule(selection).isSuccess());
         assertEquals(writesBefore, delegate.writeCount());
+    }
+
+    @Test
+    public void localFaultSurvivesRedetectAndRetryWriteStillDoesNotWrite() {
+        NotificationFlowSnapshot flow =
+                FakeNotificationFlowService.demoSnapshot(ConnectionState.CONNECTED);
+        FakeRuleStoreGateway delegate =
+                new FakeRuleStoreGateway(
+                        new RuleStoreSnapshot(
+                                flow,
+                                SOURCE,
+                                CapabilityEvidence.demoComplete(),
+                                false,
+                                false));
+        ThrowingFaultGateway gateway = new ThrowingFaultGateway(delegate);
+        SafeNotificationRuleWriter writer =
+                new SafeNotificationRuleWriter(
+                        gateway, new FakeLastKnownGoodStore());
+        RuleWriteRecoveryController controller =
+                new RuleWriteRecoveryController(writer);
+        ConfirmedTargetSelection selection =
+                new TargetSelectionFlow(flow)
+                        .select(SOURCE, "demo-target-a")
+                        .value()
+                        .orElseThrow()
+                        .confirmAuthorization();
+        StructuredRuleDraft draft =
+                StructuredRuleDraft.fromPresets(
+                        List.of(RulePreset.FOCUSED_NOTIFICATION), List.of(), 300L);
+        delegate.corruptNextWrite();
+        assertFalse(controller.saveStructuredRule(selection, draft).isSuccess());
+        assertEquals(
+                RuleRecoveryModel.State.AWAITING_DECISION,
+                controller.model().state());
+        try {
+            writer.enterReadOnlyFault("本地故障闸门测试。");
+        } catch (IllegalStateException expected) {
+            // The throwing gateway models a failed persistence attempt.
+        }
+        assertTrue(writer.isReadOnlyFault());
+        int writesBeforeRetry = delegate.writeCount();
+
+        controller.redetect();
+
+        assertEquals(
+                RuleRecoveryModel.State.PERSISTENT_READ_ONLY_FAULT,
+                controller.model().state());
+        assertFalse(controller.retry().isSuccess());
+        assertEquals(writesBeforeRetry, delegate.writeCount());
     }
 
     private static final class ThrowingFaultGateway implements RuleStoreGateway {

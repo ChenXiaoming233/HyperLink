@@ -473,6 +473,11 @@ public final class RuleLifecycleController {
     }
 
     private ServiceResult<RuleLifecycleModel> rejectPendingRecovery() {
+        if (recoveryController.hasPendingWriteRecovery()) {
+            return ServiceResult.failure(
+                    "当前仍有待恢复的普通规则写入；"
+                            + "请先通过普通写入的恢复操作回滚或受控重试。");
+        }
         if (pendingRecovery == null) {
             return null;
         }
@@ -482,6 +487,9 @@ public final class RuleLifecycleController {
     }
 
     private String effectiveBlockedError() {
+        if (recoveryController.hasPendingWriteRecovery()) {
+            return "当前仍有待恢复的普通规则写入，生命周期写入已禁用。";
+        }
         return recoveryBlockedError.isEmpty()
                 ? transientBlockedError
                 : recoveryBlockedError;

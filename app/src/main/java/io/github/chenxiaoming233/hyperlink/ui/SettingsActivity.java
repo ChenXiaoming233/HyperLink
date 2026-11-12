@@ -87,11 +87,11 @@ public final class SettingsActivity extends Activity {
     }
 
     @Override
-    protected void onDestroy() {
+    protected void onStop() {
         if (recoveryController != null) {
             recoveryController.onPageExit();
         }
-        super.onDestroy();
+        super.onStop();
     }
 
     private void initializeSharedStore(String inheritedFault) {

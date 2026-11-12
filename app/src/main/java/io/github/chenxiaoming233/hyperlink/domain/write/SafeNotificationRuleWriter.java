@@ -484,16 +484,16 @@ public final class SafeNotificationRuleWriter {
                 return new RecoveryInspection(false, false, "当前状态无法读取，受控重试已禁止。");
             }
             RuleStoreSnapshot current = readResult.value().orElseThrow();
-            String mandatoryIssue = mandatoryRecoveryIssue(plan, current);
-            if (!mandatoryIssue.isEmpty()) {
-                return new RecoveryInspection(false, false, mandatoryIssue);
-            }
             if (!skipPreRetryValidation
                     && !sameRecoveryState(failedSnapshot, current)) {
                 return new RecoveryInspection(
                         false,
                         false,
                         "当前状态不安全：写入失败后的 store 已被外部更新，受控重试已禁止。");
+            }
+            String mandatoryIssue = mandatoryRecoveryIssue(plan, current);
+            if (!mandatoryIssue.isEmpty()) {
+                return new RecoveryInspection(false, true, mandatoryIssue);
             }
             return new RecoveryInspection(true, true, "");
         }
@@ -600,8 +600,9 @@ public final class SafeNotificationRuleWriter {
             RuleStoreSnapshot initial,
             TargetDevice expectedTarget,
             RuleStoreSnapshot current) {
-        if (!current.readOnlyFaultMessage().isEmpty()) {
-            return "当前处于持久只读故障态，受控重试已禁止。";
+        String persistentFault = readOnlyFaultMessageLocked();
+        if (!persistentFault.isEmpty()) {
+            return "当前处于持久只读故障态，受控重试已禁止：" + persistentFault;
         }
         NotificationFlowSnapshot flow = current.flowSnapshot();
         if (flow.staleCache()
@@ -836,16 +837,16 @@ public final class SafeNotificationRuleWriter {
                 return new RecoveryInspection(false, false, "当前状态无法读取，受控重试已禁止。");
             }
             RuleStoreSnapshot current = readResult.value().orElseThrow();
-            String mandatoryIssue = mandatoryMutationRecoveryIssue(plan, current);
-            if (!mandatoryIssue.isEmpty()) {
-                return new RecoveryInspection(false, false, mandatoryIssue);
-            }
             if (!skipPreRetryValidation
                     && !sameRecoveryState(failedSnapshot, current)) {
                 return new RecoveryInspection(
                         false,
                         false,
                         "当前状态不安全：写入失败后的 store 已被外部更新，受控重试已禁止。");
+            }
+            String mandatoryIssue = mandatoryMutationRecoveryIssue(plan, current);
+            if (!mandatoryIssue.isEmpty()) {
+                return new RecoveryInspection(false, true, mandatoryIssue);
             }
             return new RecoveryInspection(true, true, "");
         }

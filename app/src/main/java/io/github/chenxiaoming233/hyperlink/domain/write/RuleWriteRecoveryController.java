@@ -80,6 +80,18 @@ public final class RuleWriteRecoveryController {
                         || state == RuleRecoveryModel.State.PERSISTENT_READ_ONLY_FAULT);
     }
 
+    public synchronized boolean hasPendingWriteRecovery() {
+        return pendingWrite != null
+                && (state == RuleRecoveryModel.State.AWAITING_DECISION
+                        || state == RuleRecoveryModel.State.PERSISTENT_READ_ONLY_FAULT);
+    }
+
+    public synchronized boolean hasPendingMutationRecovery() {
+        return pendingMutation != null
+                && (state == RuleRecoveryModel.State.AWAITING_DECISION
+                        || state == RuleRecoveryModel.State.PERSISTENT_READ_ONLY_FAULT);
+    }
+
     public synchronized ServiceResult<RuleCreationResult> retry() {
         if (state == RuleRecoveryModel.State.PERSISTENT_READ_ONLY_FAULT) {
             return ServiceResult.failure("持久只读故障态仅允许重新检测或再次尝试回滚。");
@@ -103,6 +115,8 @@ public final class RuleWriteRecoveryController {
         if (retry.success()) {
             controlledRetryCount++;
             state = RuleRecoveryModel.State.SUCCESS;
+            compatibilityUnverified =
+                    retry.result().compatibilityUnverified();
             pendingWrite = null;
             failedSnapshot = null;
             debugModeEnabled = false;
@@ -195,16 +209,18 @@ public final class RuleWriteRecoveryController {
     }
 
     public synchronized ServiceResult<RuleRecoveryModel> redetect() {
-        if (state == RuleRecoveryModel.State.PERSISTENT_READ_ONLY_FAULT
-                && (pendingWrite != null || pendingMutation != null)) {
-            SafeNotificationRuleWriter.RecoveryInspection inspection =
-                    pendingMutation == null
-                            ? writer.inspectPreparedWriteRecovery(
-                                    pendingWrite, failedSnapshot, false)
-                            : writer.inspectPreparedMutationRecovery(
-                                    pendingMutation, failedSnapshot, false);
-            if (inspection.canRollback()) {
-                state = RuleRecoveryModel.State.AWAITING_DECISION;
+        escalateLocalFaultIfNeeded();
+        if (state != RuleRecoveryModel.State.PERSISTENT_READ_ONLY_FAULT) {
+            return ServiceResult.failure(
+                    "仅持久只读故障态允许重新检测。");
+        }
+        if (pendingWrite != null || pendingMutation != null) {
+            if (pendingMutation == null) {
+                writer.inspectPreparedWriteRecovery(
+                        pendingWrite, failedSnapshot, false);
+            } else {
+                writer.inspectPreparedMutationRecovery(
+                        pendingMutation, failedSnapshot, false);
             }
         }
         return ServiceResult.success(model());
@@ -234,6 +250,7 @@ public final class RuleWriteRecoveryController {
     }
 
     public synchronized RuleRecoveryModel model() {
+        escalateLocalFaultIfNeeded();
         SafeNotificationRuleWriter.RecoveryInspection inspection = null;
         if ((pendingWrite != null || pendingMutation != null)
                 && state == RuleRecoveryModel.State.AWAITING_DECISION) {
@@ -253,9 +270,7 @@ public final class RuleWriteRecoveryController {
                         && state == RuleRecoveryModel.State.AWAITING_DECISION
                         && (inspection == null || inspection.canRollback());
         boolean canRedetect =
-                state == RuleRecoveryModel.State.AWAITING_DECISION
-                        || state == RuleRecoveryModel.State.CURRENT_STATE_UNSAFE
-                        || state == RuleRecoveryModel.State.PERSISTENT_READ_ONLY_FAULT;
+                state == RuleRecoveryModel.State.PERSISTENT_READ_ONLY_FAULT;
         boolean canRetryRollback =
                 (pendingWrite != null || pendingMutation != null)
                         && state == RuleRecoveryModel.State.PERSISTENT_READ_ONLY_FAULT;
@@ -278,6 +293,7 @@ public final class RuleWriteRecoveryController {
     public synchronized void enterReadOnlyFault(String message) {
         writer.enterReadOnlyFault(
                 Objects.requireNonNull(message, "message"));
+        escalateLocalFaultIfNeeded();
     }
 
     public synchronized void onPageExit() {
@@ -365,6 +381,15 @@ public final class RuleWriteRecoveryController {
     private ServiceResult<RuleCreationResult> pendingRecoveryFailure() {
         return ServiceResult.failure(
                 "当前仍有待恢复的失败写入；请先回滚或完成受控重试。");
+    }
+
+    private void escalateLocalFaultIfNeeded() {
+        if ((pendingWrite != null || pendingMutation != null)
+                && state == RuleRecoveryModel.State.AWAITING_DECISION
+                && writer.isReadOnlyFault()) {
+            state = RuleRecoveryModel.State.PERSISTENT_READ_ONLY_FAULT;
+            debugModeEnabled = false;
+        }
     }
 
     private String modelMessage(
