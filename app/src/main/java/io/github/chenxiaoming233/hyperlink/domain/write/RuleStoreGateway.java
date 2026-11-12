@@ -15,6 +15,9 @@ public interface RuleStoreGateway {
     ServiceResult<RuleWriteReceipt> restoreRules(
             RuleLkg lkg, long expectedStoreVersion, List<NotificationRule> expectedRules);
 
+    ServiceResult<RuleWriteReceipt> restoreRulesForVerifiedRecovery(
+            RuleLkg lkg, long expectedStoreVersion, List<NotificationRule> expectedRules);
+
     String readOnlyFaultMessage();
 
     void enterReadOnlyFault(String message);

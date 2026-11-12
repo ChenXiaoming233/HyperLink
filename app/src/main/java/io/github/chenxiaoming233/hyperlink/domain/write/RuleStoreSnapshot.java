@@ -133,6 +133,18 @@ public final class RuleStoreSnapshot {
                 readOnlyFaultMessage);
     }
 
+    public RuleStoreSnapshot withCapabilities(CapabilityEvidence nextCapabilities) {
+        return new RuleStoreSnapshot(
+                flowSnapshot,
+                sourceDevice,
+                Objects.requireNonNull(nextCapabilities, "nextCapabilities"),
+                unknownFieldsPresent,
+                unexpressibleDslPresent,
+                storeVersion,
+                serializedJson,
+                readOnlyFaultMessage);
+    }
+
     public RuleStoreSnapshot withPermissions(
             Map<String, Boolean> targetAuthorizations,
             NotificationAccessState nextNotificationAccess) {

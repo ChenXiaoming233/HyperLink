@@ -28,6 +28,7 @@ import io.github.chenxiaoming233.hyperlink.domain.write.CapabilityEvidence;
 import io.github.chenxiaoming233.hyperlink.domain.write.RuleStoreSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.write.SafeNotificationRuleWriter;
 import io.github.chenxiaoming233.hyperlink.domain.write.SourceDevice;
+import io.github.chenxiaoming233.hyperlink.domain.write.RuleWriteRecoveryController;
 import io.github.chenxiaoming233.hyperlink.fake.FakeLastKnownGoodStore;
 import io.github.chenxiaoming233.hyperlink.fake.FakeNotificationFlowService;
 import io.github.chenxiaoming233.hyperlink.fake.FakeRuleStoreGateway;
@@ -59,7 +60,9 @@ public final class SettingsActivity extends Activity {
     private LinearLayout targetContainer;
     private LinearLayout ruleContainer;
     private FakeRuleStoreGateway sharedGateway;
+    private FakeLastKnownGoodStore sharedLkgStore;
     private SafeNotificationRuleWriter sharedWriter;
+    private RuleWriteRecoveryController recoveryController;
     private RuleLifecycleController lifecycleController;
     private RuleEditorPanel editorPanel;
     private NotificationFlowSnapshot baseSnapshot;
@@ -83,6 +86,14 @@ public final class SettingsActivity extends Activity {
         outState.putString(STATE_READ_ONLY_FAULT, sharedGateway.readOnlyFaultMessage());
     }
 
+    @Override
+    protected void onStop() {
+        if (recoveryController != null) {
+            recoveryController.onPageExit();
+        }
+        super.onStop();
+    }
+
     private void initializeSharedStore(String inheritedFault) {
         baseSnapshot =
                 FakeNotificationFlowService.demoSnapshot(ConnectionState.CONNECTED);
@@ -99,13 +110,15 @@ public final class SettingsActivity extends Activity {
         if (!inheritedFault.isEmpty()) {
             sharedGateway.enterReadOnlyFault(inheritedFault);
         }
+        sharedLkgStore = new FakeLastKnownGoodStore();
         sharedWriter =
-                new SafeNotificationRuleWriter(
-                        sharedGateway, new FakeLastKnownGoodStore());
+                new SafeNotificationRuleWriter(sharedGateway, sharedLkgStore);
+        recoveryController =
+                new RuleWriteRecoveryController(sharedWriter);
         lifecycleController =
                 new RuleLifecycleController(
                         sharedGateway,
-                        sharedWriter,
+                        recoveryController,
                         new FakeTargetPermissionGateway(sharedGateway),
                         SystemClock::elapsedRealtime,
                         10_000L);
@@ -242,6 +255,7 @@ public final class SettingsActivity extends Activity {
                         sharedGateway,
                         sharedWriter,
                         lifecycleController,
+                        recoveryController,
                         this::refreshPageFromSharedStore);
         LinearLayout.LayoutParams editorParams = matchWrap();
         editorParams.topMargin = dp(28);

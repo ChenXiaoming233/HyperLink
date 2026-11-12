@@ -21,6 +21,7 @@ public final class RuleLifecycleModel {
     private final RuleUndoToken undoToken;
     private final NotificationAccessSettingsIntentSpec settingsIntent;
     private final boolean canUndo;
+    private final List<String> notes;
 
     private RuleLifecycleModel(
             NotificationAccessState notificationAccess,
@@ -28,7 +29,8 @@ public final class RuleLifecycleModel {
             List<RuleItem> rules,
             RuleUndoToken undoToken,
             NotificationAccessSettingsIntentSpec settingsIntent,
-            boolean canUndo) {
+            boolean canUndo,
+            List<String> notes) {
         this.notificationAccess =
                 Objects.requireNonNull(notificationAccess, "notificationAccess");
         this.blockedError = Objects.requireNonNull(blockedError, "blockedError");
@@ -36,12 +38,21 @@ public final class RuleLifecycleModel {
         this.undoToken = undoToken;
         this.settingsIntent = settingsIntent;
         this.canUndo = canUndo;
+        this.notes = immutableNotes(notes);
     }
 
     static RuleLifecycleModel from(
             RuleStoreSnapshot snapshot,
             RuleUndoToken undoToken,
             String transientBlockedError) {
+        return from(snapshot, undoToken, transientBlockedError, Collections.emptyList());
+    }
+
+    static RuleLifecycleModel from(
+            RuleStoreSnapshot snapshot,
+            RuleUndoToken undoToken,
+            String transientBlockedError,
+            List<String> notes) {
         Objects.requireNonNull(snapshot, "snapshot");
         String blockedError =
                 writeBlockedReason(
@@ -63,7 +74,7 @@ public final class RuleLifecycleModel {
                         && undoToken != null
                         && undoCanReachCurrentRule(snapshot, undoToken);
         return new RuleLifecycleModel(
-                access, blockedError, items, undoToken, settingsIntent, canUndo);
+                access, blockedError, items, undoToken, settingsIntent, canUndo, notes);
     }
 
     public NotificationAccessState notificationAccess() {
@@ -84,6 +95,10 @@ public final class RuleLifecycleModel {
 
     public boolean canUndo() {
         return canUndo;
+    }
+
+    public List<String> notes() {
+        return notes;
     }
 
     public Optional<NotificationAccessSettingsIntentSpec> notificationAccessSettingsIntent() {
@@ -291,6 +306,15 @@ public final class RuleLifecycleModel {
         ArrayList<RuleItem> copy = new ArrayList<>(values.size());
         for (RuleItem value : values) {
             copy.add(Objects.requireNonNull(value, "rule"));
+        }
+        return Collections.unmodifiableList(copy);
+    }
+
+    private static List<String> immutableNotes(List<String> values) {
+        Objects.requireNonNull(values, "notes");
+        ArrayList<String> copy = new ArrayList<>(values.size());
+        for (String value : values) {
+            copy.add(Objects.requireNonNull(value, "note"));
         }
         return Collections.unmodifiableList(copy);
     }

@@ -24,6 +24,7 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
     private boolean failAllReads;
     private boolean failNextWrite;
     private boolean corruptNextWrite;
+    private boolean corruptEveryWrite;
     private boolean activateReadFailureAfterWrite;
     private int readsToFailAfterWrite;
     private boolean failAllReadsAfterWrite;
@@ -90,7 +91,8 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
                 expectedStoreVersion,
                 expectedRules,
                 current -> current.withRules(rules),
-                false);
+                false,
+                null);
     }
 
     @Override
@@ -104,7 +106,23 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
                 current ->
                         current.withRules(lkg.rules())
                                 .withSafetyFlags(false, false),
-                true);
+                true,
+                null);
+    }
+
+    @Override
+    public ServiceResult<RuleWriteReceipt> restoreRulesForVerifiedRecovery(
+            RuleLkg lkg,
+            long expectedStoreVersion,
+            List<NotificationRule> expectedRules) {
+        return executeWrite(
+                expectedStoreVersion,
+                expectedRules,
+                current ->
+                        current.withRules(lkg.rules())
+                                .withSafetyFlags(false, false),
+                true,
+                lkg.serializedJson());
     }
 
     @Override
@@ -127,7 +145,8 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
             long expectedStoreVersion,
             List<NotificationRule> expectedRules,
             UnaryOperator<RuleStoreSnapshot> preparation,
-            boolean restore) {
+            boolean restore,
+            String requiredRecoverySerialized) {
         beginWrite();
         try {
             signalWriteStarted();
@@ -145,7 +164,8 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
                         return ServiceResult.failure("演示规则写入失败。");
                     }
                     RuleStoreSnapshot current = store.snapshot();
-                    if (!store.readOnlyFaultMessage().isEmpty()) {
+                    if (!store.readOnlyFaultMessage().isEmpty()
+                            && requiredRecoverySerialized == null) {
                         return ServiceResult.failure("演示 store 处于持久只读故障态。");
                     }
                     if (current.storeVersion() != expectedStoreVersion
@@ -167,7 +187,7 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
                     }
 
                     RuleStoreSnapshot candidate =
-                            applyCorruption(preparation.apply(current));
+                            applyCorruption(preparation.apply(current), restore);
                     boolean unknownFields =
                             candidate.unknownFieldsPresent() || unknownFieldsOnEveryWrite
                                     || unknownFieldsOnNextWrite;
@@ -180,6 +200,14 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
                                     applyPermissionMutations(
                                             candidate.withSafetyFlags(
                                                     unknownFields, unexpressibleDsl)));
+                    if (requiredRecoverySerialized != null) {
+                        if (!stored.serializedJson().equals(requiredRecoverySerialized)) {
+                            return ServiceResult.failure(
+                                    "演示恢复写入未匹配已验证 LKG，未清除故障态。");
+                        }
+                        store.clearReadOnlyFaultAfterVerifiedRollback();
+                        stored = stored.withReadOnlyFault("");
+                    }
                     store.replaceSnapshot(stored);
                     RuleWriteReceipt receipt =
                             new RuleWriteReceipt(
@@ -225,8 +253,8 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
         return candidate.withPermissions(authorizations, access);
     }
 
-    private RuleStoreSnapshot applyCorruption(RuleStoreSnapshot candidate) {
-        if (!corruptNextWrite || candidate.rules().isEmpty()) {
+    private RuleStoreSnapshot applyCorruption(RuleStoreSnapshot candidate, boolean restore) {
+        if (restore || (!corruptNextWrite && !corruptEveryWrite) || candidate.rules().isEmpty()) {
             return candidate;
         }
         corruptNextWrite = false;
@@ -355,6 +383,10 @@ public final class FakeRuleStoreGateway implements RuleStoreGateway {
 
     public synchronized void corruptNextWrite() {
         corruptNextWrite = true;
+    }
+
+    public synchronized void corruptEveryWrite() {
+        corruptEveryWrite = true;
     }
 
     public synchronized void failReadsAfterNextWrite(int count) {
