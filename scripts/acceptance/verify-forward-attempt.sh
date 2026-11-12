@@ -112,6 +112,11 @@ if ! result="$(
                         }
                     }
 
+                    if (run_count != 1 || run == "") {
+                        bad = 1
+                        continue
+                    }
+
                     if (!matches_expected_run) {
                         continue
                     }

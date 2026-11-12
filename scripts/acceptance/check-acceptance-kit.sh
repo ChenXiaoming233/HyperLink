@@ -265,6 +265,7 @@ for text in \
     'another forwardId in the current run' \
     'old run with the same forwardId' \
     'different run with missing fields' \
+    'marker without runId' \
     'expected-run marker with missing timestamp' \
     'expected-run marker with missing forwardId' \
     'expected-run marker with missing attempt' \

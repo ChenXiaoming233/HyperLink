@@ -83,7 +83,8 @@ adb logcat -d -v epoch \
 标记，包含不同 `forwardId` 的标记；不得先按 `--forward-id` 过滤。随后按标记出现次数统计：
 
 - 当前 run 总数必须恰好为 1，且该唯一标记的 `forwardId` 必须等于 `--forward-id`。
-- 先读取每个标记的 `runId`。`runId` 与 expected 不同的标记即使 `forwardId` 相同也可忽略。
+- 先读取每个标记的 `runId`。`runId` 与 expected 不同的标记即使 `forwardId` 相同也可忽略；
+  标记缺少 `runId`、`runId=` 为空或 `runId` 重复时直接 FAIL，因为无法确认它属于其他 run。
 - 一旦 `runId == expected`，任何缺失 `timestampEpoch`、`forwardId` 或 `attempt`，以及
   timestamp 非数字或早于 `--since`，都必须直接 FAIL，不得忽略后继续。
 - expected-run 的旧 timestamp 不能当作历史日志忽略；所有 expected-run 标记都必须参与总数

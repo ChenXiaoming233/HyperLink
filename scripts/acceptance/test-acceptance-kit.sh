@@ -110,6 +110,13 @@ case "$different_run_ignored" in
 esac
 
 expect_verifier_failure \
+    "forward verifier accepted a marker without runId" \
+    "$current_marker"$'\n''I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt timestampEpoch=1700000101 forwardId=forward-current attempt=1' \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-current
+
+expect_verifier_failure \
     "forward verifier ignored an expected-run marker with missing timestamp" \
     "$current_marker"$'\n''I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-current forwardId=forward-other attempt=1' \
     --run-id run-current \
