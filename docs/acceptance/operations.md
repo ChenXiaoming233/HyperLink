@@ -83,8 +83,11 @@ adb logcat -d -v epoch \
 标记，包含不同 `forwardId` 的标记；不得先按 `--forward-id` 过滤。随后按标记出现次数统计：
 
 - 当前 run 总数必须恰好为 1，且该唯一标记的 `forwardId` 必须等于 `--forward-id`。
-- 同名旧 run 即使 `forwardId` 相同也不计数，但不匹配 run 或时间窗的历史标记不能掩盖当前
-  run 的重复投递。
+- 先读取每个标记的 `runId`。`runId` 与 expected 不同的标记即使 `forwardId` 相同也可忽略。
+- 一旦 `runId == expected`，任何缺失 `timestampEpoch`、`forwardId` 或 `attempt`，以及
+  timestamp 非数字或早于 `--since`，都必须直接 FAIL，不得忽略后继续。
+- expected-run 的旧 timestamp 不能当作历史日志忽略；所有 expected-run 标记都必须参与总数
+  统计，避免旧标记掩盖当前重复投递。
 - 同一行出现多个标记、任一字段重复、`attempt` 不为 1，或 current-run 同时出现 expected 与
   其他 `forwardId` 都会失败。
 - 标记 token 必须精确等于 `forward_attempt`；`forward_attempted` 等相似 token 不计数。
@@ -125,7 +128,8 @@ adb logcat -d -v epoch \
 - 任何工具要求直接写生产 JSON、绕过认证、强制保存或强制删除。
 - 读取失败、哈希不可得、LKG 不可读回、回滚结果无法验证。
 - 受控通知没有当前 run 标记、出现多个标记、current-run 出现多个 `forwardId`、重复字段、
-  `forward_attempted` 冒充标记、重复 attempt 标记或任何 `attempt` 大于 1。
+  expected-run 字段不完整或 timestamp 越界、`forward_attempted` 冒充标记、重复 attempt
+  标记或任何 `attempt` 大于 1。
 
 安全退出顺序：
 

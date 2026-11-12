@@ -72,6 +72,7 @@ if ! result="$(
                     timestamp_count = 0
                     forward_count = 0
                     attempt_count = 0
+                    matches_expected_run = 0
                     run = ""
                     timestamp = ""
                     forward = ""
@@ -82,9 +83,13 @@ if ! result="$(
                         }
                         if (tokens[field_index] ~ /^runId=/) {
                             run_count++
+                            run_value = tokens[field_index]
+                            sub(/^runId=/, "", run_value)
+                            if (run_value == run_id) {
+                                matches_expected_run = 1
+                            }
                             if (run_count == 1) {
-                                run = tokens[field_index]
-                                sub(/^runId=/, "", run)
+                                run = run_value
                             }
                         } else if (tokens[field_index] ~ /^timestampEpoch=/) {
                             timestamp_count++
@@ -107,7 +112,7 @@ if ! result="$(
                         }
                     }
 
-                    if (run != run_id || timestamp !~ /^[0-9]+$/ || timestamp + 0 < since + 0) {
+                    if (!matches_expected_run) {
                         continue
                     }
 
@@ -115,7 +120,7 @@ if ! result="$(
                     if (run_count != 1 || timestamp_count != 1 || forward_count != 1 || attempt_count != 1) {
                         bad = 1
                     }
-                    if (run == "" || forward == "" || attempt !~ /^[0-9]+$/ || attempt + 0 != 1) {
+                    if (run != run_id || timestamp !~ /^[0-9]+$/ || timestamp + 0 < since + 0 || forward == "" || attempt !~ /^[0-9]+$/ || attempt + 0 != 1) {
                         bad = 1
                     }
                     if (selected == 1) {

@@ -140,7 +140,10 @@ for text in \
     '人工审批' \
     '必须同时' \
     '不得先按 `--forward-id` 过滤' \
-    'forward_attempted'
+    'forward_attempted' \
+    '一旦 `runId == expected`' \
+    'timestamp 非数字或早于 `--since`' \
+    'expected-run 的旧 timestamp'
 do
     require_text "$OPERATIONS_FILE" "$text"
 done
@@ -248,6 +251,9 @@ require_text "$FORWARD_VERIFIER_FILE" '--forward-id'
 require_text "$FORWARD_VERIFIER_FILE" 'timestampEpoch'
 require_text "$FORWARD_VERIFIER_FILE" 'tokens[token_index] != marker'
 require_text "$FORWARD_VERIFIER_FILE" 'selected_forward != expected_forward_id'
+require_text "$FORWARD_VERIFIER_FILE" 'matches_expected_run'
+require_text "$FORWARD_VERIFIER_FILE" 'if (!matches_expected_run)'
+require_text "$FORWARD_VERIFIER_FILE" 'timestamp + 0 < since + 0'
 require_text "$FORWARD_VERIFIER_FILE" '--run-id is required'
 require_text "$FORWARD_VERIFIER_FILE" '--since is required'
 require_text "$FORWARD_VERIFIER_FILE" '--forward-id is required'
@@ -258,6 +264,12 @@ fi
 for text in \
     'another forwardId in the current run' \
     'old run with the same forwardId' \
+    'different run with missing fields' \
+    'expected-run marker with missing timestamp' \
+    'expected-run marker with missing forwardId' \
+    'expected-run marker with missing attempt' \
+    'expected-run marker with non-numeric timestamp' \
+    'expected-run marker before the time window' \
     'counted lines instead of marker occurrences' \
     'duplicate forwardId tokens' \
     'multiple attempt tokens' \

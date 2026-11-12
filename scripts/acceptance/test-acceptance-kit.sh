@@ -98,6 +98,52 @@ case "$historical_pass" in
     *) fail "forward verifier returned an unexpected old-run result" ;;
 esac
 
+different_run_ignored="$(
+    run_verifier "$current_marker"$'\n''I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-old' \
+        --run-id run-current \
+        --since 1700000000 \
+        --forward-id forward-current
+)" || fail "forward verifier did not ignore a different run with missing fields"
+case "$different_run_ignored" in
+    *'forwardAttempts=1 attempt=1'*) ;;
+    *) fail "forward verifier returned an unexpected different-run result" ;;
+esac
+
+expect_verifier_failure \
+    "forward verifier ignored an expected-run marker with missing timestamp" \
+    "$current_marker"$'\n''I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-current forwardId=forward-other attempt=1' \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-current
+
+expect_verifier_failure \
+    "forward verifier ignored an expected-run marker with missing forwardId" \
+    "$current_marker"$'\n''I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-current timestampEpoch=1700000101 attempt=1' \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-current
+
+expect_verifier_failure \
+    "forward verifier ignored an expected-run marker with missing attempt" \
+    "$current_marker"$'\n''I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-current timestampEpoch=1700000101 forwardId=forward-other' \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-current
+
+expect_verifier_failure \
+    "forward verifier ignored an expected-run marker with non-numeric timestamp" \
+    "$current_marker"$'\n''I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-current timestampEpoch=not-a-number forwardId=forward-other attempt=1' \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-current
+
+expect_verifier_failure \
+    "forward verifier ignored an expected-run marker before the time window" \
+    "$current_marker"$'\n''I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-current timestampEpoch=1600000000 forwardId=forward-other attempt=1' \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-current
+
 expect_verifier_failure \
     "forward verifier accepted another forwardId in the current run" \
     "$current_marker"$'\n''I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-current timestampEpoch=1700000101 forwardId=forward-other attempt=1' \
