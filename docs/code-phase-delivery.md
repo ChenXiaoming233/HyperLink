@@ -32,9 +32,10 @@
 ```bash
 export JAVA_HOME=/d/Scoop/Folder/apps/openjdk17/current
 export ANDROID_HOME=/d/AppData/Android/Sdk
-./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest
+bash scripts/check.sh
 ```
 
+本地脚本与 GitHub Actions 共用该入口；CI 在推送 `codex/**` 分支或创建 PR 时执行。
 最后一次完整 JVM 测试结果为 201/201 通过；Lint 为 0 error，仅有既有非阻塞 warning；
 `assembleDebug` 与 `assembleDebugAndroidTest` 成功。各工单的测试与 review 记录见对应
 GitHub Issue 评论。

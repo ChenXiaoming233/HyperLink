@@ -145,7 +145,9 @@ for text in \
     'forward_attempted' \
     '一旦 `runId == expected`' \
     'timestamp 非数字或早于 `--since`' \
-    'expected-run 的旧 timestamp'
+    'expected-run 的旧 timestamp' \
+    'MSYS_NO_PATHCONV=1' \
+    'ACCESS_CONTENT_PROVIDERS_EXTERNALLY'
 do
     require_text "$OPERATIONS_FILE" "$text"
 done

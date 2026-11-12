@@ -109,6 +109,13 @@ ANDROID_SERIAL='<设备序列号占位>' \
 bash scripts/acceptance/probe-hook-targets.sh
 ```
 
+Windows Git Bash 手工执行涉及 Android 绝对路径的 `adb shell` 命令时，先设置
+`export MSYS_NO_PATHCONV=1`；探针脚本已自行设置。`adb shell content call` 或
+`run-as ... content call` 不能作为调用方身份证据：前者缺少
+`ACCESS_CONTENT_PROVIDERS_EXTERNALLY` 时会失败，后者仍走 external provider API。
+Provider 调用方必须由 HyperLink 自身 UID 内的 instrumentation 通过
+`ContentResolver.call()` 验证。
+
 脚本执行以下只读或进程级检查：
 
 - 要求一台匹配序列号的 online 设备、root shell 和 SELinux `Enforcing`。
