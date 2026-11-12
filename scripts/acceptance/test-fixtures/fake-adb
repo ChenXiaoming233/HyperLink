@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+
+fake_adb() {
+    local scenario="${FAKE_ADB_SCENARIO:-success}"
+    local fake_sha='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    local command_name
+    local shell_command
+    local package_name
+    local index
+
+    if [ "$#" -eq 0 ]; then
+        return 2
+    fi
+
+    command_name="$1"
+    shift
+
+    case "$command_name" in
+    devices)
+        printf 'List of devices attached\n'
+        case "$scenario" in
+            multiple-devices)
+                printf 'fixture-serial\tdevice\n'
+                printf 'fixture-other\tdevice\n'
+                ;;
+            serial-mismatch)
+                printf 'fixture-other\tdevice\n'
+                ;;
+            offline-device)
+                printf 'fixture-serial\toffline\n'
+                ;;
+            *)
+                printf 'fixture-serial\tdevice\n'
+                ;;
+        esac
+        printf '\n'
+        ;;
+    get-state)
+        printf 'device\n'
+        ;;
+    shell)
+        shell_command="${1:-}"
+        shift || true
+        case "$shell_command" in
+            id)
+                printf '0\n'
+                ;;
+            getenforce)
+                printf 'Enforcing\n'
+                ;;
+            command)
+                printf '/system/bin/sha256sum\n'
+                ;;
+            getprop)
+                printf '[ro.product.model]: [Fixture-Phone]\n'
+                printf '[ro.build.version.release]: [16]\n'
+                printf '[ro.build.version.sdk]: [36]\n'
+                printf '[ro.build.fingerprint]: [fixture/build/acceptance]\n'
+                ;;
+            dumpsys)
+                package_name="${2:-}"
+                case "$package_name" in
+                    com.miui.voiceassist|com.milink.service) ;;
+                    *) return 3 ;;
+                esac
+                printf 'Package [%s] (fixture):\n' "$package_name"
+                printf '    versionName=8.2.70.8421\n'
+                printf '    versionCode=8421 minSdk=28 targetSdk=36\n'
+                printf '    userId=1000\n'
+                printf '    signatures=PackageSignatures{fixture}\n'
+                if [ "$scenario" != 'signature-unverified' ]; then
+                    printf '    certificateHex=01020304\n'
+                fi
+                if [ "$scenario" = 'large-dumpsys' ]; then
+                    for ((index = 0; index < 4000; index++)); do
+                        printf '    fixtureNoise=%s\n' "$index"
+                    done
+                fi
+                ;;
+            pidof)
+                package_name="${1:-}"
+                case "$package_name:$scenario" in
+                    com.miui.voiceassist:pid-missing-voiceassist) return 1 ;;
+                    com.milink.service:pid-missing-milink) return 1 ;;
+                    com.miui.voiceassist:*) printf '123\n' ;;
+                    com.milink.service:*) printf '456\n' ;;
+                    *) return 4 ;;
+                esac
+                ;;
+            pm)
+                package_name="${2:-}"
+                case "$package_name" in
+                    com.miui.voiceassist)
+                        printf 'package:/product/priv-app/VoiceAssistAndroidT/base.apk\n'
+                        ;;
+                    com.milink.service)
+                        printf 'package:/product/priv-app/MiLink/base.apk\n'
+                        ;;
+                    *) return 5 ;;
+                esac
+                ;;
+            test)
+                ;;
+            stat)
+                printf 'size=128 mtimeEpoch=1700000000 mode=600 uid=1000 gid=1000\n'
+                ;;
+            sha256sum)
+                printf '%s  %s\n' "$fake_sha" "${1:-fixture-file}"
+                ;;
+            *)
+                return 6
+                ;;
+        esac
+        ;;
+    *)
+        return 7
+        ;;
+    esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    set -euo pipefail
+    fake_adb "$@"
+fi

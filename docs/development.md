@@ -176,6 +176,9 @@ Demo/demo 合成数据。
 - Android SDK Platform 36
 - Gradle Wrapper（仓库自带）
 
+设备级验收材料见 [`docs/acceptance/README.md`](acceptance/README.md)。这些材料只定义实机
+恢复后的只读预检、受控操作、证据和恢复流程；当前仓库自检不会连接设备或执行验收。
+
 Windows Git Bash 中可如下设置环境变量：
 
 ```bash
