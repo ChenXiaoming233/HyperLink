@@ -114,11 +114,11 @@ public final class SettingsActivity extends Activity {
         sharedWriter =
                 new SafeNotificationRuleWriter(sharedGateway, sharedLkgStore);
         recoveryController =
-                new RuleWriteRecoveryController(sharedGateway, sharedLkgStore);
+                new RuleWriteRecoveryController(sharedWriter);
         lifecycleController =
                 new RuleLifecycleController(
                         sharedGateway,
-                        sharedWriter,
+                        recoveryController,
                         new FakeTargetPermissionGateway(sharedGateway),
                         SystemClock::elapsedRealtime,
                         10_000L);

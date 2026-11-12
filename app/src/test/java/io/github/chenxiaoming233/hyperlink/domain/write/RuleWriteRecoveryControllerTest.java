@@ -44,6 +44,23 @@ public final class RuleWriteRecoveryControllerTest {
     }
 
     @Test
+    public void allNotificationsCreationUsesTheSameRecoveryFlow() {
+        Fixture fixture = fixture("demo-version-tested");
+        fixture.gateway.corruptNextWrite();
+
+        assertFalse(
+                fixture.controller
+                        .createAllNotificationsRule(fixture.selection)
+                        .isSuccess());
+        assertEquals(
+                RuleRecoveryModel.State.AWAITING_DECISION,
+                fixture.controller.model().state());
+
+        assertTrue(fixture.controller.retry().isSuccess());
+        assertEquals(3, fixture.gateway.currentRules().size());
+    }
+
+    @Test
     public void secondFailureRollsBackAutomaticallyWithoutReplacingOriginalLkg() {
         Fixture fixture = fixture("demo-version-tested");
         List<NotificationRule> original = new ArrayList<>(fixture.gateway.currentRules());
@@ -74,9 +91,33 @@ public final class RuleWriteRecoveryControllerTest {
         int writesBeforeRetry = fixture.gateway.writeCount();
 
         assertFalse(fixture.controller.model().canRetry());
+        assertFalse(fixture.controller.model().canRollback());
         assertFalse(fixture.controller.retry().isSuccess());
         assertEquals(writesBeforeRetry, fixture.gateway.writeCount());
         assertTrue(fixture.controller.model().message().contains("不安全"));
+    }
+
+    @Test
+    public void sameVersionExternalRuleChangeIsUnsafeAndRetryNeverOverwritesIt() {
+        Fixture fixture = fixture("demo-version-tested");
+        List<NotificationRule> externalRules =
+                externalValidRules(fixture.gateway.currentRules());
+        fixture.gateway.replaceRulesAfterNextWrite(externalRules);
+
+        assertFalse(
+                fixture.controller
+                        .saveStructuredRule(fixture.selection, fixture.draft)
+                        .isSuccess());
+
+        RuleRecoveryModel model = fixture.controller.model();
+        assertEquals(RuleRecoveryModel.State.CURRENT_STATE_UNSAFE, model.state());
+        assertFalse(model.canRetry());
+        assertFalse(model.canRollback());
+        int writesBeforeRetry = fixture.gateway.writeCount();
+
+        assertFalse(fixture.controller.retry().isSuccess());
+        assertEquals(writesBeforeRetry, fixture.gateway.writeCount());
+        assertSameRules(externalRules, fixture.gateway.currentRules());
     }
 
     @Test
@@ -215,6 +256,23 @@ public final class RuleWriteRecoveryControllerTest {
         assertTrue(fixture.controller.saveStructuredRule(fixture.selection, fixture.draft).isSuccess());
 
         RuleRecoveryModel model = fixture.controller.model();
+        assertTrue(model.compatibilityUnverified());
+        assertTrue(model.message().contains("兼容性未经完整验收"));
+    }
+
+    @Test
+    public void unknownVersionUnsafeRecoveryViewKeepsCompatibilityWarning() {
+        Fixture fixture = fixture("demo-version-unknown");
+        fixture.gateway.replaceRulesAfterNextWrite(
+                externalValidRules(fixture.gateway.currentRules()));
+
+        assertFalse(
+                fixture.controller
+                        .saveStructuredRule(fixture.selection, fixture.draft)
+                        .isSuccess());
+
+        RuleRecoveryModel model = fixture.controller.model();
+        assertEquals(RuleRecoveryModel.State.CURRENT_STATE_UNSAFE, model.state());
         assertTrue(model.compatibilityUnverified());
         assertTrue(model.message().contains("兼容性未经完整验收"));
     }

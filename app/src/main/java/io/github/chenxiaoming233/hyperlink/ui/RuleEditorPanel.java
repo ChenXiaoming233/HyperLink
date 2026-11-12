@@ -1000,6 +1000,10 @@ final class RuleEditorPanel extends LinearLayout {
                 refreshExistingRules(RuleEditorLoadState.from(gateway));
                 notifyStoreChanged();
                 renderRecoveryModel(recoveryModel);
+                if (recoveryModel.state()
+                        == RuleRecoveryModel.State.AWAITING_DECISION) {
+                    showRecoveryDialog(recoveryModel);
+                }
                 setStatus(result.userMessage());
                 return;
             }
@@ -1149,6 +1153,16 @@ final class RuleEditorPanel extends LinearLayout {
             existingRulesContainer.addView(
                     text(model.blockedError(), 14, Color.rgb(156, 50, 35)));
         }
+        if (!model.notes().isEmpty()) {
+            TextView notes =
+                    text(
+                            String.join("\n", model.notes()),
+                            13,
+                            Color.rgb(132, 54, 24));
+            notes.setPadding(dp(8), dp(6), dp(8), dp(6));
+            notes.setBackgroundColor(Color.rgb(250, 218, 190));
+            existingRulesContainer.addView(notes, matchWrap());
+        }
         if (undoToken != null) {
             Button undo = actionButton("撤销最近的暂停/恢复");
             undo.setOnClickListener(view -> undoLifecycleChange(undoToken));
@@ -1249,6 +1263,11 @@ final class RuleEditorPanel extends LinearLayout {
             ServiceResult<RuleLifecycleModel> result, String successMessage) {
         refreshExistingRules();
         if (!result.isSuccess()) {
+            RuleRecoveryModel recovery = lifecycleController.recoveryModel();
+            renderRecoveryModel(recovery);
+            if (recovery.state() == RuleRecoveryModel.State.AWAITING_DECISION) {
+                showRecoveryDialog(recovery);
+            }
             notifyStoreChanged();
             setStatus(result.userMessage());
             return;
@@ -1257,7 +1276,7 @@ final class RuleEditorPanel extends LinearLayout {
         undoToken = model.canUndo() ? model.undoToken().orElse(null) : null;
         refreshExistingRules();
         notifyStoreChanged();
-        setStatus(successMessage);
+        setStatus(withNotes(successMessage, model.notes()));
     }
 
     private void requestDeleteRule(String ruleId) {
@@ -1294,13 +1313,20 @@ final class RuleEditorPanel extends LinearLayout {
             notifyStoreChanged();
         }
         if (!result.isSuccess()) {
+            RuleRecoveryModel recovery = lifecycleController.recoveryModel();
+            renderRecoveryModel(recovery);
+            if (recovery.state() == RuleRecoveryModel.State.AWAITING_DECISION) {
+                showRecoveryDialog(recovery);
+            }
             setStatus(result.userMessage());
         } else if (!confirmed) {
             setStatus("已取消删除；未写入规则，也未撤销目标授权。");
         } else {
             setStatus(
-                    "规则已删除，并已通过 fake 权限 gateway 撤销目标授权；"
-                            + "未连接真实系统授权 API。");
+                    withNotes(
+                            "规则已删除，并已通过 fake 权限 gateway 撤销目标授权；"
+                                    + "未连接真实系统授权 API。",
+                            result.value().orElseThrow().notes()));
         }
     }
 
@@ -1432,6 +1458,32 @@ final class RuleEditorPanel extends LinearLayout {
         }
     }
 
+    private void showRecoveryDialog(RuleRecoveryModel recovery) {
+        RuleRecoveryDialogModel dialogModel = RuleRecoveryDialogModel.from(recovery);
+        AlertDialog.Builder builder =
+                new AlertDialog.Builder(activity)
+                        .setTitle(dialogModel.title())
+                        .setMessage(dialogModel.message())
+                        .setNegativeButton(
+                                dialogModel.deferLabel(),
+                                (dialog, which) ->
+                                        renderRecoveryModel(
+                                                recoveryController.model()));
+        if (dialogModel.rollbackEnabled()) {
+            builder.setPositiveButton(
+                    dialogModel.rollbackLabel(),
+                    (dialog, which) -> rollbackRecovery());
+        }
+        if (dialogModel.retryEnabled()) {
+            builder.setNeutralButton(
+                    recovery.debugModeEnabled()
+                            ? "调试模式继续发起原写入"
+                            : dialogModel.retryLabel(),
+                    (dialog, which) -> retryRecovery());
+        }
+        builder.show();
+    }
+
     private void refreshWriteCompatibilityWarning() {
         if (writeCompatibilityWarningView == null) {
             return;
@@ -1457,6 +1509,12 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void retryRecovery() {
+        if (lifecycleController.hasPendingRecovery()) {
+            completeLifecycleChange(
+                    lifecycleController.retryMutationRecovery(),
+                    "生命周期写入已通过受控重试并通过完整回读校验。");
+            return;
+        }
         ServiceResult<RuleCreationResult> result = recoveryController.retry();
         modelReadiness = RuleModelReadiness.inspect(gateway);
         applyModelReadiness();
@@ -1472,10 +1530,20 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void rollbackRecovery() {
+        if (lifecycleController.hasPendingRecovery()) {
+            completeLifecycleRecoveryRollback(
+                    lifecycleController.rollbackMutationRecovery());
+            return;
+        }
         completeRecoveryRollback(recoveryController.rollback());
     }
 
     private void retryRollbackRecovery() {
+        if (lifecycleController.hasPendingRecovery()) {
+            completeLifecycleRecoveryRollback(
+                    lifecycleController.retryRollbackMutationRecovery());
+            return;
+        }
         completeRecoveryRollback(recoveryController.retryRollback());
     }
 
@@ -1495,13 +1563,35 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void redetectRecovery() {
-        ServiceResult<RuleRecoveryModel> result = recoveryController.redetect();
+        ServiceResult<RuleRecoveryModel> result =
+                lifecycleController.hasPendingRecovery()
+                        ? lifecycleController.redetectRecovery()
+                        : recoveryController.redetect();
         writeGate.refresh(gateway);
         modelReadiness = RuleModelReadiness.inspect(gateway);
         applyModelReadiness();
         refreshExistingRules(RuleEditorLoadState.from(gateway));
         renderRecoveryModel(result.value().orElseGet(recoveryController::model));
         setStatus(result.isSuccess() ? result.value().orElseThrow().message() : result.userMessage());
+    }
+
+    private void completeLifecycleRecoveryRollback(
+            ServiceResult<RuleLifecycleModel> result) {
+        writeGate.refresh(gateway);
+        modelReadiness = RuleModelReadiness.inspect(gateway);
+        applyModelReadiness();
+        refreshExistingRules(RuleEditorLoadState.from(gateway));
+        notifyStoreChanged();
+        RuleRecoveryModel recovery = lifecycleController.recoveryModel();
+        renderRecoveryModel(recovery);
+        setStatus(
+                result.isSuccess()
+                        ? withNotes(recovery.message(), result.value().orElseThrow().notes())
+                        : result.userMessage());
+    }
+
+    private String withNotes(String message, List<String> notes) {
+        return notes.isEmpty() ? message : message + "\n" + String.join("\n", notes);
     }
 
     private void setStatus(String message) {

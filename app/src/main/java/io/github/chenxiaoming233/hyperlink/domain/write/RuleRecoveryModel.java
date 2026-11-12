@@ -6,6 +6,7 @@ public final class RuleRecoveryModel {
     public enum State {
         IDLE,
         AWAITING_DECISION,
+        CURRENT_STATE_UNSAFE,
         SUCCESS,
         ROLLED_BACK,
         PERSISTENT_READ_ONLY_FAULT
