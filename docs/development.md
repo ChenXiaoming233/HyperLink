@@ -187,6 +187,17 @@ export PATH="$JAVA_HOME/bin:$PATH"
 export ANDROID_HOME=/d/AppData/Android/Sdk
 ```
 
+## 统一离线检查
+
+本地与 CI 使用同一入口：
+
+```bash
+bash scripts/check.sh
+```
+
+该命令运行 JVM 测试、Lint、两个 APK 的构建和 Shell 语法检查，不连接设备。GitHub Actions
+在推送 `codex/**` 分支或创建 PR 时执行同一脚本。
+
 ## 单元测试
 
 ```bash
@@ -243,6 +254,23 @@ adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 
 LSPosed 元数据与 `xposed_init` 会安装 Issue #2 的只读目标探针。探针不会创建、暂停、恢复
 或删除真实规则，也不会主动发送通知。
+
+## 厂商 APK 静态分析
+
+先查 `docs/ref/跨设备通知操控说明.md` 是否已记录目标类、字段或方法。只有参考文档缺少当前
+契约时才执行定点反编译，并始终把输出写到仓库外：
+
+```bash
+OUT_DIR="${TMPDIR:-/tmp}/hyperlink-jadx"
+mkdir -p "$OUT_DIR"
+jadx --no-res \
+  --single-class '<完整类名>' \
+  --single-class-output "$OUT_DIR/<类名>.java" \
+  '<厂商APK路径>'
+```
+
+不要省略 `--single-class-output`，否则 jadx 会在当前目录创建整包输出。厂商 APK、DEX 和
+反编译源码都不进入公开仓库。
 
 ## Hook 目标运行时探针
 
