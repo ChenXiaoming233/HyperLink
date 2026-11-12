@@ -17,7 +17,6 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
-import io.github.chenxiaoming233.hyperlink.domain.ConnectionState;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationFlowSnapshot;
 import io.github.chenxiaoming233.hyperlink.domain.NotificationRule;
 import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
@@ -30,7 +29,10 @@ import io.github.chenxiaoming233.hyperlink.domain.editor.RuleBranch;
 import io.github.chenxiaoming233.hyperlink.domain.editor.RuleCondition;
 import io.github.chenxiaoming233.hyperlink.domain.editor.RulePreset;
 import io.github.chenxiaoming233.hyperlink.domain.editor.StructuredRuleDraft;
-import io.github.chenxiaoming233.hyperlink.domain.write.CapabilityEvidence;
+import io.github.chenxiaoming233.hyperlink.domain.lifecycle.DeleteConfirmation;
+import io.github.chenxiaoming233.hyperlink.domain.lifecycle.RuleLifecycleController;
+import io.github.chenxiaoming233.hyperlink.domain.lifecycle.RuleLifecycleModel;
+import io.github.chenxiaoming233.hyperlink.domain.lifecycle.RuleUndoToken;
 import io.github.chenxiaoming233.hyperlink.domain.write.ConfirmedTargetSelection;
 import io.github.chenxiaoming233.hyperlink.domain.write.RuleCreationResult;
 import io.github.chenxiaoming233.hyperlink.domain.write.RuleModelReadiness;
@@ -41,25 +43,25 @@ import io.github.chenxiaoming233.hyperlink.domain.write.StructuredRuleDsl;
 import io.github.chenxiaoming233.hyperlink.domain.write.TargetSelection;
 import io.github.chenxiaoming233.hyperlink.domain.write.TargetSelectionFlow;
 import io.github.chenxiaoming233.hyperlink.fake.FakeAppCatalog;
-import io.github.chenxiaoming233.hyperlink.fake.FakeLastKnownGoodStore;
-import io.github.chenxiaoming233.hyperlink.fake.FakeNotificationFlowService;
 import io.github.chenxiaoming233.hyperlink.fake.FakeRuleStoreGateway;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 
 final class RuleEditorPanel extends LinearLayout {
     private final Activity activity;
-    private final NotificationFlowSnapshot snapshot;
-    private final SourceDevice source;
-    private final List<TargetDevice> targets;
+    private SourceDevice source;
+    private List<TargetDevice> targets;
     private final FakeAppCatalog appCatalog;
     private final List<AppCatalogEntry> catalogApps;
     private final FakeRuleStoreGateway gateway;
     private final SafeNotificationRuleWriter writer;
-    private final TargetSelectionFlow targetSelectionFlow;
+    private final RuleLifecycleController lifecycleController;
+    private final Runnable storeChangedListener;
+    private TargetSelectionFlow targetSelectionFlow;
     private final Set<RulePreset> selectedPresets = new LinkedHashSet<>();
     private final List<CheckBox> presetChecks = new ArrayList<>();
     private final EditableViewTracker<View> persistentEditableViews =
@@ -85,26 +87,28 @@ final class RuleEditorPanel extends LinearLayout {
     private TextView summaryView;
     private TextView modelReadinessView;
     private TextView statusView;
+    private RuleUndoToken undoToken;
+    private final RuleEditorWriteGate writeGate = new RuleEditorWriteGate();
 
-    RuleEditorPanel(Activity activity) {
+    RuleEditorPanel(
+            Activity activity,
+            FakeRuleStoreGateway gateway,
+            SafeNotificationRuleWriter writer,
+            RuleLifecycleController lifecycleController,
+            Runnable storeChangedListener) {
         super(activity);
         this.activity = activity;
-        this.snapshot =
-                FakeNotificationFlowService.demoSnapshot(ConnectionState.CONNECTED);
+        this.gateway = Objects.requireNonNull(gateway, "gateway");
+        this.writer = Objects.requireNonNull(writer, "writer");
+        this.lifecycleController =
+                Objects.requireNonNull(lifecycleController, "lifecycleController");
+        this.storeChangedListener =
+                Objects.requireNonNull(storeChangedListener, "storeChangedListener");
+        NotificationFlowSnapshot snapshot = gateway.snapshot().flowSnapshot();
         this.source = sourceFrom(snapshot);
         this.targets = receivableTargets(snapshot);
         this.appCatalog = FakeAppCatalog.demo();
         this.catalogApps = readCatalog(appCatalog);
-        this.gateway =
-                new FakeRuleStoreGateway(
-                        new RuleStoreSnapshot(
-                                snapshot,
-                                source,
-                                CapabilityEvidence.demoComplete(),
-                                false,
-                                false));
-        this.writer =
-                new SafeNotificationRuleWriter(gateway, new FakeLastKnownGoodStore());
         this.targetSelectionFlow = new TargetSelectionFlow(snapshot);
         this.modelReadiness = RuleModelReadiness.inspect(gateway);
         this.interactionPolicy = new RuleEditorInteractionPolicy(modelReadiness);
@@ -894,7 +898,7 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void save() {
-        if (rejectWhenReadOnly()) {
+        if (rejectWhenReadOnly() || !writesAvailable()) {
             return;
         }
         if (!draft.canSave()) {
@@ -925,7 +929,7 @@ final class RuleEditorPanel extends LinearLayout {
     }
 
     private void completeSave(RuleSaveGate.SaveDecision decision) {
-        if (rejectWhenReadOnly()) {
+        if (rejectWhenReadOnly() || !writesAvailable()) {
             return;
         }
         if (!decision.shouldSave()) {
@@ -934,12 +938,18 @@ final class RuleEditorPanel extends LinearLayout {
         }
         ConfirmedTargetSelection confirmed =
                 decision.confirmedSelection().orElseThrow();
+        int writesBefore = gateway.writeCount();
         ServiceResult<RuleCreationResult> result =
                 writer.saveStructuredRule(confirmed, draft);
         modelReadiness = RuleModelReadiness.inspect(gateway);
         applyModelReadiness();
         if (!result.isSuccess()) {
-            refreshExistingRules();
+            boolean writeAttempted = gateway.writeCount() > writesBefore;
+            RuleEditorLoadState loadState =
+                    writeGate.refreshAfterWriteFailure(gateway, writeAttempted);
+            applyRefreshState(loadState);
+            refreshExistingRules(loadState);
+            notifyStoreChanged();
             setStatus(result.userMessage());
             return;
         }
@@ -950,6 +960,7 @@ final class RuleEditorPanel extends LinearLayout {
         refreshStructure();
         refreshApps();
         refreshExistingRules();
+        notifyStoreChanged();
         setStatus(RuleSaveFeedback.from(saved, creationResult.notes()).displayText());
     }
 
@@ -1005,34 +1016,260 @@ final class RuleEditorPanel extends LinearLayout {
         }
     }
 
+    void refreshFromStore() {
+        RuleEditorLoadState loadState = refreshLoadState();
+        if (!loadState.writable()) {
+            return;
+        }
+        NotificationFlowSnapshot snapshot = gateway.snapshot().flowSnapshot();
+        source = sourceFrom(snapshot);
+        targets = receivableTargets(snapshot);
+        targetSelectionFlow = new TargetSelectionFlow(snapshot);
+        refreshTargetSelector();
+        refreshExistingRules();
+    }
+
+    private void refreshTargetSelector() {
+        if (targetSelector == null) {
+            return;
+        }
+        List<String> targetLabels = new ArrayList<>();
+        int selectedIndex = -1;
+        for (int index = 0; index < targets.size(); index++) {
+            TargetDevice target = targets.get(index);
+            targetLabels.add(target.displayName() + " · " + target.deviceId());
+            if (target.deviceId().equals(selectedTargetId)) {
+                selectedIndex = index;
+            }
+        }
+        targetSelector.setAdapter(
+                new ArrayAdapter<>(
+                        activity,
+                        android.R.layout.simple_spinner_dropdown_item,
+                        targetLabels));
+        if (selectedIndex < 0 && !targets.isEmpty()) {
+            selectedIndex = 0;
+            selectedTargetId = targets.get(0).deviceId();
+        }
+        if (selectedIndex >= 0) {
+            targetSelector.setSelection(selectedIndex);
+        }
+    }
+
     private void refreshExistingRules() {
+        refreshExistingRules(refreshLoadState());
+    }
+
+    private void refreshExistingRules(RuleEditorLoadState loadState) {
+        if (!loadState.writable()) {
+            if (existingRulesContainer != null) {
+                existingRulesContainer.removeAllViews();
+                existingRulesContainer.addView(
+                        text(loadState.message(), 14, Color.rgb(156, 50, 35)));
+            }
+            return;
+        }
         if (existingRulesContainer == null) {
             return;
         }
         refreshCoordinator.beginRebuild(
                 RuleEditorRefreshCoordinator.Area.EXISTING_RULES);
         existingRulesContainer.removeAllViews();
-        for (NotificationRule rule : gateway.currentRules()) {
-            existingRulesContainer.addView(createExistingRuleCard(rule));
+        ServiceResult<RuleLifecycleModel> refreshed = lifecycleController.refresh();
+        if (!refreshed.isSuccess()) {
+            existingRulesContainer.addView(
+                    text(refreshed.userMessage(), 14, Color.rgb(156, 50, 35)));
+            return;
+        }
+        RuleLifecycleModel model = refreshed.value().orElseThrow();
+        undoToken = model.canUndo() ? model.undoToken().orElse(null) : null;
+        if (!model.blockedError().isEmpty()) {
+            existingRulesContainer.addView(
+                    text(model.blockedError(), 14, Color.rgb(156, 50, 35)));
+        }
+        if (undoToken != null) {
+            Button undo = actionButton("撤销最近的暂停/恢复");
+            undo.setOnClickListener(view -> undoLifecycleChange(undoToken));
+            existingRulesContainer.addView(undo);
+        }
+        for (RuleLifecycleModel.RuleItem item : model.rules()) {
+            NotificationRule stored = findStoredRule(item.ruleId());
+            if (stored != null) {
+                existingRulesContainer.addView(createExistingRuleCard(item, stored));
+            }
         }
     }
 
-    private View createExistingRuleCard(NotificationRule rule) {
+    private View createExistingRuleCard(
+            RuleLifecycleModel.RuleItem item, NotificationRule rule) {
         LinearLayout card = card();
         TextView heading = text(rule.ruleId(), 15, Color.rgb(30, 38, 36));
         heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         card.addView(heading);
         card.addView(
                 text(
-                        "状态：" + rule.status() + " · 创建时间：" + rule.createdAt(),
+                        "状态："
+                                + item.displayStatus()
+                                + "（原始值："
+                                + rule.status()
+                                + "） · 创建时间："
+                                + rule.createdAt(),
+                        13,
+                        Color.rgb(111, 119, 114)));
+        card.addView(
+                text(
+                        "目标："
+                                + item.targetDeviceName()
+                                + " · 目标授权："
+                                + (item.targetAuthorized() ? "已授权" : "未授权"),
                         13,
                         Color.rgb(111, 119, 114)));
         card.addView(text(rule.summary(), 14, Color.rgb(50, 58, 54)));
+        if (!item.blockedMessage().isEmpty()) {
+            card.addView(
+                    text(item.blockedMessage(), 13, Color.rgb(156, 50, 35)));
+        }
+        LinearLayout actions = actionRow();
+        if (item.canPause()) {
+            actions.addView(
+                    smallButton(
+                            "暂停规则",
+                            view -> pauseRule(item.ruleId())));
+        }
+        if (item.canResume()) {
+            actions.addView(
+                    smallButton(
+                            "恢复规则",
+                            view -> resumeRule(item.ruleId())));
+        }
+        if (item.canDelete()) {
+            actions.addView(
+                    smallButton(
+                            "删除规则",
+                            view -> requestDeleteRule(item.ruleId())));
+        }
         Button edit = rawActionButton("载入并编辑");
         trackExistingRuleEditable(edit);
         edit.setOnClickListener(view -> loadRule(rule));
-        card.addView(edit);
+        actions.addView(edit);
+        card.addView(actions);
         return card;
+    }
+
+    private void pauseRule(String ruleId) {
+        if (!writesAvailable()) {
+            return;
+        }
+        completeLifecycleChange(
+                lifecycleController.pause(ruleId),
+                "规则已暂停并持久化为 paused；可在 10 秒内撤销。");
+    }
+
+    private void resumeRule(String ruleId) {
+        if (!writesAvailable()) {
+            return;
+        }
+        completeLifecycleChange(
+                lifecycleController.resume(ruleId),
+                "规则已恢复为 active，并复用原 ruleId；可在 10 秒内撤销。");
+    }
+
+    private void undoLifecycleChange(RuleUndoToken token) {
+        if (!writesAvailable()) {
+            return;
+        }
+        completeLifecycleChange(
+                lifecycleController.undo(token),
+                "已撤销最近一次暂停/恢复操作。");
+    }
+
+    private void completeLifecycleChange(
+            ServiceResult<RuleLifecycleModel> result, String successMessage) {
+        refreshExistingRules();
+        if (!result.isSuccess()) {
+            notifyStoreChanged();
+            setStatus(result.userMessage());
+            return;
+        }
+        RuleLifecycleModel model = result.value().orElseThrow();
+        undoToken = model.canUndo() ? model.undoToken().orElse(null) : null;
+        refreshExistingRules();
+        notifyStoreChanged();
+        setStatus(successMessage);
+    }
+
+    private void requestDeleteRule(String ruleId) {
+        if (!writesAvailable()) {
+            return;
+        }
+        ServiceResult<DeleteConfirmation> requested =
+                lifecycleController.requestDelete(ruleId);
+        if (!requested.isSuccess()) {
+            setStatus(requested.userMessage());
+            return;
+        }
+        DeleteConfirmation confirmation = requested.value().orElseThrow();
+        new AlertDialog.Builder(activity)
+                .setTitle("确认删除规则并撤销目标授权")
+                .setMessage(confirmation.prompt())
+                .setPositiveButton(
+                        "确认删除并撤销授权",
+                        (dialog, which) -> completeDelete(confirmation, true))
+                .setNegativeButton(
+                        "取消",
+                        (dialog, which) -> completeDelete(confirmation, false))
+                .show();
+    }
+
+    private void completeDelete(DeleteConfirmation confirmation, boolean confirmed) {
+        if (!writesAvailable()) {
+            return;
+        }
+        ServiceResult<RuleLifecycleModel> result =
+                lifecycleController.confirmDelete(confirmation, confirmed);
+        refreshExistingRules();
+        if (confirmed) {
+            notifyStoreChanged();
+        }
+        if (!result.isSuccess()) {
+            setStatus(result.userMessage());
+        } else if (!confirmed) {
+            setStatus("已取消删除；未写入规则，也未撤销目标授权。");
+        } else {
+            setStatus(
+                    "规则已删除，并已通过 fake 权限 gateway 撤销目标授权；"
+                            + "未连接真实系统授权 API。");
+        }
+    }
+
+    private void notifyStoreChanged() {
+        storeChangedListener.run();
+    }
+
+    private RuleEditorLoadState refreshLoadState() {
+        RuleEditorLoadState loadState = writeGate.refresh(gateway);
+        applyRefreshState(loadState);
+        return loadState;
+    }
+
+    private void applyRefreshState(RuleEditorLoadState loadState) {
+        setVisibility(loadState.writable() ? VISIBLE : GONE);
+    }
+
+    private boolean writesAvailable() {
+        if (!writeGate.writesAvailable()) {
+            setStatus("共享 fake store 当前不可读或处于只读故障态，未执行写入。");
+        }
+        return writeGate.writesAvailable();
+    }
+
+    private NotificationRule findStoredRule(String ruleId) {
+        for (NotificationRule rule : gateway.currentRules()) {
+            if (rule.ruleId().equals(ruleId)) {
+                return rule;
+            }
+        }
+        return null;
     }
 
     private String conditionText(RuleCondition condition) {

@@ -51,6 +51,43 @@ public final class SafeNotificationRuleWriter {
         }
     }
 
+    public ServiceResult<RuleMutationResult> changeRuleStatus(
+            String ruleId,
+            String expectedTargetDeviceId,
+            String expectedStatus,
+            String nextStatus,
+            boolean expectedTargetAuthorized) {
+        if (!isLifecycleStatus(expectedStatus)
+                || !isLifecycleStatus(nextStatus)
+                || expectedStatus.equals(nextStatus)) {
+            return ServiceResult.failure("仅支持 active 与 paused 之间的规则状态变更。");
+        }
+        synchronized (PROCESS_WRITE_LOCK) {
+            return mutateRuleLocked(
+                    ruleId,
+                    expectedTargetDeviceId,
+                    expectedStatus,
+                    nextStatus,
+                    expectedTargetAuthorized,
+                    false);
+        }
+    }
+
+    public ServiceResult<RuleMutationResult> deleteRule(
+            String ruleId,
+            String expectedTargetDeviceId,
+            boolean expectedTargetAuthorized) {
+        synchronized (PROCESS_WRITE_LOCK) {
+            return mutateRuleLocked(
+                    ruleId,
+                    expectedTargetDeviceId,
+                    "",
+                    "",
+                    expectedTargetAuthorized,
+                    true);
+        }
+    }
+
     private ServiceResult<RuleCreationResult> createAllNotificationsRuleLocked(
             ConfirmedTargetSelection selection) {
         return writeRuleLocked(
@@ -225,7 +262,189 @@ public final class SafeNotificationRuleWriter {
         }
     }
 
-    private ServiceResult<RuleCreationResult> failAfterWriteAttempt(
+    public void enterReadOnlyFault(String message) {
+        synchronized (PROCESS_WRITE_LOCK) {
+            gateway.enterReadOnlyFault(Objects.requireNonNull(message, "message"));
+        }
+    }
+
+    private ServiceResult<RuleMutationResult> mutateRuleLocked(
+            String ruleId,
+            String expectedTargetDeviceId,
+            String expectedStatus,
+            String nextStatus,
+            boolean expectedTargetAuthorized,
+            boolean delete) {
+        if (ruleId == null || ruleId.trim().isEmpty()) {
+            return ServiceResult.failure("未指定要修改的规则，未执行任何写入。");
+        }
+        if (expectedTargetDeviceId == null
+                || expectedTargetDeviceId.trim().isEmpty()) {
+            return ServiceResult.failure("未指定预期目标，未执行任何写入。");
+        }
+        String persistentFault = readOnlyFaultMessageLocked();
+        if (!persistentFault.isEmpty()) {
+            return ServiceResult.failure(persistentFault);
+        }
+
+        ServiceResult<RuleStoreSnapshot> readResult;
+        try {
+            readResult = gateway.read();
+        } catch (RuntimeException exception) {
+            return ServiceResult.failure("规则快照读取异常，未执行任何写入。");
+        }
+        if (!readResult.isSuccess()) {
+            return ServiceResult.failure("无法读取完整规则快照，未执行任何写入。");
+        }
+        RuleStoreSnapshot current = readResult.value().orElseThrow();
+        if (!current.readOnlyFaultMessage().isEmpty()) {
+            return ServiceResult.failure(current.readOnlyFaultMessage());
+        }
+        NotificationFlowSnapshot flow = current.flowSnapshot();
+        if (flow.staleCache()
+                || (flow.connectionState() != ConnectionState.CONNECTED
+                        && flow.connectionState()
+                                != ConnectionState.COMPATIBILITY_UNVERIFIED)) {
+            return ServiceResult.failure("当前规则快照不可用于写入。");
+        }
+        CapabilityReport capability = CapabilityProbe.evaluate(current.capabilities());
+        if (!capability.passed()) {
+            return ServiceResult.failure(capability.readOnlyMessage());
+        }
+        String snapshotIssue = RuleSnapshotValidator.issue(current);
+        if (!snapshotIssue.isEmpty()) {
+            return enterReadOnlyFaultLocked(snapshotIssue);
+        }
+
+        int ruleIndex = findRuleIndex(current.rules(), ruleId);
+        if (ruleIndex < 0) {
+            return ServiceResult.failure("规则不存在或已被外部修改，请重新读取。");
+        }
+        NotificationRule currentRule = current.rules().get(ruleIndex);
+        if (!expectedTargetDeviceId.equals(currentRule.targetDeviceId())) {
+            return ServiceResult.failure(
+                    "规则目标已在外部变化，未执行任何写入；不会删除或撤销错误目标。");
+        }
+        TargetDevice target = findTarget(flow, currentRule.targetDeviceId());
+        if (target == null) {
+            return ServiceResult.failure("规则目标不在当前快照中，未执行任何写入。");
+        }
+        if (flow.notificationAccess() != NotificationAccessState.GRANTED) {
+            return ServiceResult.failure(
+                    "系统通知使用权未满足，未执行任何生命周期写入。");
+        }
+        if (target.targetAuthorized() != expectedTargetAuthorized) {
+            return ServiceResult.failure(
+                    "目标授权已在外部变化，未执行任何写入；不会自动重新授权或覆盖外部变化。");
+        }
+        if (!target.targetAuthorized()) {
+            return ServiceResult.failure(
+                    "目标尚未授权，未执行任何生命周期写入。");
+        }
+        if (!delete && !expectedStatus.equals(currentRule.status())) {
+            return ServiceResult.failure("规则状态已被外部修改，未执行任何写入。");
+        }
+
+        RuleLkg lkg = RuleLkg.capture(current);
+        boolean lkgSaved;
+        try {
+            lkgSaved = lkgStore.save(lkg);
+        } catch (RuntimeException exception) {
+            return ServiceResult.failure("无法保存完整 LKG，未执行任何写入。");
+        }
+        if (!lkgSaved) {
+            return ServiceResult.failure("无法保存完整 LKG，未执行任何写入。");
+        }
+        lastLkg = lkg;
+
+        NotificationRule changedRule = null;
+        List<NotificationRule> candidate = new ArrayList<>(current.rules());
+        if (delete) {
+            candidate.remove(ruleIndex);
+        } else {
+            changedRule =
+                    new NotificationRule(
+                            currentRule.ruleId(),
+                            currentRule.sourceDeviceId(),
+                            currentRule.sourceDeviceName(),
+                            currentRule.targetDeviceId(),
+                            currentRule.targetDeviceName(),
+                            nextStatus,
+                            currentRule.summary(),
+                            currentRule.dslJson(),
+                            currentRule.createdAt());
+            candidate.set(ruleIndex, changedRule);
+        }
+        String expectedSerialized;
+        try {
+            expectedSerialized = RuleSerialization.serialize(candidate);
+        } catch (RuntimeException exception) {
+            return ServiceResult.failure("无法生成有效规则，未执行任何写入。");
+        }
+
+        ServiceResult<RuleWriteReceipt> writeResult;
+        try {
+            writeResult =
+                    gateway.write(
+                            candidate, current.storeVersion(), current.rules());
+        } catch (RuntimeException exception) {
+            return failAfterWriteAttempt(
+                    lkg, current, "规则变更写入异常，");
+        }
+        if (!writeResult.isSuccess()) {
+            return failAfterWriteAttempt(
+                    lkg, current, "规则变更写入未完成，");
+        }
+        RuleWriteReceipt receipt = writeResult.value().orElseThrow();
+
+        ServiceResult<RuleStoreSnapshot> readBack;
+        try {
+            readBack = gateway.read();
+        } catch (RuntimeException exception) {
+            return failAfterCommittedReadFailure(
+                    lkg, receipt, "规则变更后回读异常，");
+        }
+        if (!readBack.isSuccess()) {
+            return failAfterCommittedReadFailure(
+                    lkg, receipt, "规则变更后无法回读规则，");
+        }
+        RuleStoreSnapshot verified = readBack.value().orElseThrow();
+        if (!verified.readOnlyFaultMessage().isEmpty()
+                || verified.storeVersion() != receipt.storeVersion()
+                || hasUnsafeStructure(verified)
+                || !lkg.targetStatesMatch(verified)
+                || !lkg.permissionsMatch(verified)
+                || !receipt.serializedJson().equals(expectedSerialized)
+                || !verified.serializedJson().equals(expectedSerialized)
+                || !matchesRules(candidate, verified.rules())
+                || !uniqueRuleIds(candidate)) {
+            return failAfterCommittedWrite(
+                    lkg, receipt, verified, "规则变更后校验失败，");
+        }
+        if (!readOnlyFaultMessageLocked().isEmpty()) {
+            return failAfterCommittedWrite(
+                    lkg, receipt, verified, "规则变更返回前只读故障态已变化，");
+        }
+
+        List<String> notes = new ArrayList<>();
+        notes.add(systemGateNotice(flow.notificationAccess()));
+        notes.add(targetCapabilityNotice(target));
+        boolean compatibilityUnverified =
+                capability.compatibilityUnverified() || flow.compatibilityUnverified();
+        if (compatibilityUnverified) {
+            notes.add("兼容性未经完整验收：运行时能力探测已通过，但当前 VoiceAssist 版本未完成完整验收。");
+        }
+        return ServiceResult.success(
+                new RuleMutationResult(
+                        changedRule,
+                        currentRule.targetDeviceId(),
+                        verified,
+                        lkg,
+                        compatibilityUnverified,
+                        notes));
+    }
+
+    private <T> ServiceResult<T> failAfterWriteAttempt(
             RuleLkg lkg,
             RuleStoreSnapshot initial,
             String failurePrefix) {
@@ -255,7 +474,7 @@ public final class SafeNotificationRuleWriter {
         return ServiceResult.failure(failurePrefix + "已仅回滚本次规则并验证。");
     }
 
-    private ServiceResult<RuleCreationResult> failAfterCommittedReadFailure(
+    private <T> ServiceResult<T> failAfterCommittedReadFailure(
             RuleLkg lkg,
             RuleWriteReceipt receipt,
             String failurePrefix) {
@@ -268,7 +487,7 @@ public final class SafeNotificationRuleWriter {
                 lkg, receipt, observed, failurePrefix);
     }
 
-    private ServiceResult<RuleCreationResult> failAfterCommittedWrite(
+    private <T> ServiceResult<T> failAfterCommittedWrite(
             RuleLkg lkg,
             RuleWriteReceipt receipt,
             RuleStoreSnapshot observed,
@@ -349,7 +568,7 @@ public final class SafeNotificationRuleWriter {
                 && uniqueRuleIds(verified.rules());
     }
 
-    private ServiceResult<RuleCreationResult> enterReadOnlyFaultLocked(String message) {
+    private <T> ServiceResult<T> enterReadOnlyFaultLocked(String message) {
         try {
             gateway.enterReadOnlyFault(message);
         } catch (RuntimeException exception) {
@@ -503,6 +722,19 @@ public final class SafeNotificationRuleWriter {
             }
         }
         return null;
+    }
+
+    private static int findRuleIndex(List<NotificationRule> rules, String ruleId) {
+        for (int index = 0; index < rules.size(); index++) {
+            if (rules.get(index).ruleId().equals(ruleId)) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean isLifecycleStatus(String status) {
+        return "active".equals(status) || "paused".equals(status);
     }
 
     private static String systemGateNotice(NotificationAccessState access) {

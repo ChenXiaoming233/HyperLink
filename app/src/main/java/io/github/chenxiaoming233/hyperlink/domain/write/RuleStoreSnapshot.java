@@ -96,6 +96,10 @@ public final class RuleStoreSnapshot {
         return readOnlyFaultMessage;
     }
 
+    public String writeSafetyIssue() {
+        return RuleSnapshotValidator.issue(this);
+    }
+
     public RuleStoreSnapshot withRules(List<NotificationRule> rules) {
         List<NotificationRule> copy = immutableCopy(rules);
         return new RuleStoreSnapshot(

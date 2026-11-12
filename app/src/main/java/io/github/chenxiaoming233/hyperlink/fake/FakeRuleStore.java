@@ -21,7 +21,14 @@ public final class FakeRuleStore {
     }
 
     public synchronized void replaceSnapshot(RuleStoreSnapshot nextSnapshot) {
-        snapshot = Objects.requireNonNull(nextSnapshot, "nextSnapshot");
+        RuleStoreSnapshot replacement =
+                Objects.requireNonNull(nextSnapshot, "nextSnapshot");
+        String existingFault = readOnlyFaultMessage();
+        snapshot =
+                existingFault.isEmpty()
+                                || existingFault.equals(replacement.readOnlyFaultMessage())
+                        ? replacement
+                        : replacement.withReadOnlyFault(existingFault);
     }
 
     public synchronized void enterReadOnlyFault(String message) {
