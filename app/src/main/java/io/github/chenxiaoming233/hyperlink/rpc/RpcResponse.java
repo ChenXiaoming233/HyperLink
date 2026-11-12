@@ -42,6 +42,25 @@ public final class RpcResponse {
                 userMessage(RpcErrorCode.NONE));
     }
 
+    public static RpcResponse success(String requestId, RuntimeProbeSnapshot snapshot) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put(RuntimeProbeContract.KEY_STORE_READY, snapshot.storeReady());
+        data.put(RuntimeProbeContract.KEY_RULE_STORE_READABLE, snapshot.ruleStoreReadable());
+        data.put(RuntimeProbeContract.KEY_RULE_COUNT, snapshot.ruleCount());
+        data.put(RuntimeProbeContract.KEY_DEVICE_INFO_READABLE, snapshot.deviceInfoReadable());
+        data.put(RuntimeProbeContract.KEY_TARGET_COUNT, snapshot.targetCount());
+        data.put(
+                RuntimeProbeContract.KEY_NOTIFICATION_LISTENER_ACCESS,
+                snapshot.notificationListenerAccess());
+        return new RpcResponse(
+                requestId,
+                true,
+                RpcErrorCode.NONE,
+                0L,
+                data,
+                userMessage(RpcErrorCode.NONE));
+    }
+
     public static RpcResponse failure(String requestId, RpcErrorCode errorCode) {
         return new RpcResponse(
                 requestId,

@@ -1,14 +1,16 @@
-# HyperLink 代码阶段交付说明（#12–#20）
+# HyperLink 代码阶段交付说明（#12–#20 与 #2 探针）
 
 ## 交付状态
 
 - 集成分支：`codex/hyperlink-code-12-20`
 - 代码工单：#12–#20 已关闭
-- 设备验收：#2–#10 与实机环境工单 #11 保持 OPEN
+- #2 Hook 目标确认：静态与实机确认通过，已关闭
+- 实机环境工单 #11：已关闭
+- 后续设备验收：#3–#10 保持 OPEN
 - 总规格 #1 保持 OPEN
 
-本阶段完成的是可离线构建、可运行 JVM 测试的 fake/纯逻辑代码骨架。它不包含真实
-LSPosed Hook、VoiceAssist Provider 接线、真实 MiLink 入口注入或设备级验收。
+本阶段完成的是可离线构建、可运行 JVM 测试的 fake/纯逻辑代码骨架，以及 Issue #2 所需的
+只读 LSPosed 目标探针。探针不包含规则读写、通知发送或设备级业务验收。
 
 ## 已完成的代码能力
 
@@ -21,6 +23,7 @@ LSPosed Hook、VoiceAssist Provider 接线、真实 MiLink 入口注入或设备
 - 支持暂停、恢复、短时撤销、删除和 fake 权限同步。
 - 支持受控重试、自动回滚、持久只读故障和默认关闭的调试模式。
 - 提供设备验收矩阵、只读预检、证据模板、安全退出和 ACC-14 日志校验入口。
+- 提供 MiLink preference 注入与 VoiceAssist `LinkContentProvider.call()` 认证探针。
 
 ## 自动化验证
 
@@ -29,39 +32,58 @@ LSPosed Hook、VoiceAssist Provider 接线、真实 MiLink 入口注入或设备
 ```bash
 export JAVA_HOME=/d/Scoop/Folder/apps/openjdk17/current
 export ANDROID_HOME=/d/AppData/Android/Sdk
-./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
+./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest
 ```
 
-最后一次完整 JVM 测试结果为 197/197 通过；Lint 为 0 error，仅有既有非阻塞 warning；
-`assembleDebug` 成功。各工单的测试与 review 记录见对应 GitHub Issue 评论。
+最后一次完整 JVM 测试结果为 201/201 通过；Lint 为 0 error，仅有既有非阻塞 warning；
+`assembleDebug` 与 `assembleDebugAndroidTest` 成功。各工单的测试与 review 记录见对应
+GitHub Issue 评论。
 
-验收工具另有仓库自检：
+验收工具另有仓库自检和 Issue #2 设备探针：
 
 ```bash
 bash scripts/acceptance/check-acceptance-kit.sh
+HYPERLINK_ACCEPTANCE_DEVICE_OK=1 \
+ANDROID_SERIAL='<设备序列号占位>' \
+bash scripts/acceptance/probe-hook-targets.sh
 ```
 
-该自检耗时数分钟，不作为每次代码构建的默认门禁。
+仓库自检耗时数分钟，不作为每次代码构建的默认门禁；设备探针只能由执行人显式启动。
 
-## 尚未执行的实机项
+## Issue #2 设备确认
 
-- 真实 LSPosed 模块加载、MiLink 设置入口注入和 VoiceAssist 进程内适配器。
-- 生产 `CallerEvidenceResolver`、ContentProvider `call()` 适配器和真实认证采集。
+2026-11-12 在 Xiaomi `25128PNA1C`、HyperOS `OS4.0.6.0.XPACNXM`、Android 17、
+SELinux `Enforcing` 环境完成确认：
+
+- MiLink `ConnectivityFragment` 探针稳定加载，`hyperlink_notification_flow` 插入
+  `category_pref_key_cross_device`；手动点击后前台 Activity 为模块 `SettingsActivity`。
+- VoiceAssist Provider 冷启动返回 `SERVICE_UNAVAILABLE`；listener 就绪后认证 RPC 返回
+  规则 `3` 条、目标设备状态 `3` 个、通知监听使用权 `true`。
+- HyperLink UID `10602`、VoiceAssist UID `10158`、MiLink UID `10186`；认证通过证明 UID、
+  包名、签名 pin 与包可见性组合可工作。
+- VoiceAssist 前后 PID 均存在且不同，进程重启验证通过。
+- 探针前后规则文件 SHA-256 均为
+  `43a2e5d4b140aeafdb6d21c644b5a78b615c6be79434a7239aefd8128775e5e8`，授权文件均为
+  `ae0c5b95bf3f41a2689d624db0e448d7a3471ee02b5c1bd2aac377bcc1ad8708`。
+
+## 尚未执行的后续实机项
+
+- 生产规则适配器、设置面板 RPC 接线和真实 store 操作。
 - 真实规则 store、权限 store、LKG 持久化和 Provider 冷启动。
-- 热生效、进程重启、SELinux、UID、包可见性和跨进程原子性。
+- 真实规则 CRUD 热生效与跨进程原子性。
 - 真实通知转发、桌面端展示、单次 `forward_attempt` 日志证据。
-- #2–#10 的完整纵向验收与 #11 的实机环境验证。
+- #3–#10 的完整纵向验收。
 
-## 恢复设备后的下一步
+## 后续实机验收顺序
 
-1. 先完成 #11，确认指定设备、root shell、SELinux、VoiceAssist/MiLink 进程和版本基线。
-2. 阅读 `docs/acceptance/README.md`，执行只读预检并归档脱敏证据。
-3. 按 `docs/acceptance/matrix.md` 的 ACC-01–ACC-14 顺序执行；失败时按安全退出流程停止。
-4. 仅通过模块 LKG/受控 API 备份和恢复规则，禁止 shell 直接覆盖生产 JSON。
-5. 将设备型号、系统版本、应用版本、APK SHA-256、时间、日志和 Issue 链接写入证据模板。
-6. 修复设备验收发现的问题后重新执行相关矩阵项；未执行 ACC-14 前不得宣称单次转发成立。
+1. 按 `docs/acceptance/README.md` 运行设备预检。
+2. 按 `docs/acceptance/matrix.md` 的 ACC-01–ACC-14 顺序执行；失败时按安全退出流程停止。
+3. 仅通过模块 LKG/受控 API 备份和恢复规则，禁止 shell 直接覆盖生产 JSON。
+4. 将设备型号、系统版本、应用版本、APK SHA-256、时间、日志和 Issue 链接写入证据模板。
+5. 修复设备验收发现的问题后重新执行相关矩阵项；未执行 ACC-14 前不得宣称单次转发成立。
 
 ## 边界声明
 
-fake gateway、fake store、JVM 测试和编译成功均不代表真实 VoiceAssist/MiLink 集成完成。
-在 #10 与 #11 完成前，不应宣称真实热生效、进程恢复、权限同步、通知送达或设备兼容性验收通过。
+fake gateway、fake store、JVM 测试和编译成功均不代表真实业务适配完成。#2 只证明入口、
+Provider、认证和只读能力探测可用；在 #3–#10 完成前，不应宣称真实规则 CRUD 热生效、
+权限同步、通知送达或完整设备兼容性验收通过。

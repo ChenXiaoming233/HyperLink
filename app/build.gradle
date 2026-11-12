@@ -2,6 +2,16 @@ plugins {
     id "com.android.application"
 }
 
+def probeCallerSignerSha256 =
+        providers.gradleProperty("hyperlinkProbeCallerSignerSha256")
+                .orElse("")
+                .get()
+                .trim()
+                .toLowerCase()
+if (!probeCallerSignerSha256.isEmpty() && !(probeCallerSignerSha256 ==~ /[0-9a-f]{64}/)) {
+    throw new GradleException("hyperlinkProbeCallerSignerSha256 must be 64 hexadecimal characters")
+}
+
 android {
     namespace "io.github.chenxiaoming233.hyperlink"
     compileSdk 36
@@ -12,6 +22,8 @@ android {
         targetSdk 36
         versionCode 1
         versionName "0.1.0"
+        buildConfigField "String", "PROBE_CALLER_SIGNER_SHA256", "\"$probeCallerSignerSha256\""
+        testInstrumentationRunner "io.github.chenxiaoming233.hyperlink.RuntimeProbeInstrumentation"
     }
 
     compileOptions {

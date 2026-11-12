@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <instrumentation
+        android:name="io.github.chenxiaoming233.hyperlink.RuntimeProbeInstrumentation"
+        android:targetPackage="io.github.chenxiaoming233.hyperlink"
+        android:label="HyperLink runtime probe" />
+</manifest>

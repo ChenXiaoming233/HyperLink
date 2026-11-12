@@ -1,7 +1,6 @@
 package io.github.chenxiaoming233.hyperlink.xposed;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 public final class HyperLinkModule implements IXposedHookLoadPackage {
@@ -10,13 +9,10 @@ public final class HyperLinkModule implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam loadPackageParam) {
-        if (!VOICE_ASSIST_PACKAGE.equals(loadPackageParam.packageName)
-                && !MILINK_PACKAGE.equals(loadPackageParam.packageName)) {
-            return;
+        if (VOICE_ASSIST_PACKAGE.equals(loadPackageParam.packageName)) {
+            VoiceAssistRuntimeProbe.install(loadPackageParam);
+        } else if (MILINK_PACKAGE.equals(loadPackageParam.packageName)) {
+            MiLinkEntryProbe.install(loadPackageParam);
         }
-        XposedBridge.log(
-                "HyperLink: module skeleton loaded for "
-                        + loadPackageParam.packageName
-                        + "; no hook installed");
     }
 }

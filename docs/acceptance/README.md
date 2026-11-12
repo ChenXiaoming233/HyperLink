@@ -1,7 +1,9 @@
 # 设备验收工具包
 
-本目录只准备 Issue #10 的实机验收材料，不执行任何实机验收，也不关闭 Issue #10 或
-Issue #11。工具、模板和仓库自检均不连接设备、不读取真实规则、不发送通知。
+本目录准备 Issue #2 的目标探针与 Issue #10 的实机验收材料，不自动执行任何实机验收，
+也不关闭 Issue #2、#10 或 #11。仓库自检保持离线；设备预检、目标探针和功能矩阵只在
+执行人显式设置授权环境变量后连接设备。探针只读取脱敏运行时摘要，不读取规则正文，
+不发送通知。
 
 ## 入口
 
@@ -41,6 +43,8 @@ bash scripts/acceptance/preflight-device.sh
 - [验收操作手册](operations.md)：只读预检、受控通知测试、日志过滤、备份恢复与安全退出。
 - [证据模板](evidence-template.md)：归档字段、脱敏规则和目录结构。
 - `scripts/acceptance/preflight-device.sh`：设备侧只读元数据与哈希采集。
+- `scripts/acceptance/probe-hook-targets.sh`：Issue #2 的 MiLink 入口与 VoiceAssist
+  Provider 只读运行时探针。
 - `scripts/acceptance/verify-forward-attempt.sh`：仅从标准输入验证一次转发尝试。
 - `scripts/acceptance/test-acceptance-kit.sh`：不依赖设备的校验器与 fake adb 行为测试。
 
@@ -48,7 +52,8 @@ bash scripts/acceptance/preflight-device.sh
 
 1. 复制证据模板，填写执行窗口、Issue #10 与 Issue #20 链接；不得填写真实设备 ID、序列号、
    账号、IP 或 `ruleId`。
-2. 运行设备预检并保存终端输出。任一步失败即停止，不进入功能矩阵。
+2. 运行设备预检并保存终端输出。Issue #2 随后运行
+   `scripts/acceptance/probe-hook-targets.sh`；任一步失败即停止。
 3. 按 [操作手册](operations.md) 确认 LKG 与受控 API 可用。任一条件不满足时，将相关场景标记为
    `BLOCKED`，不得退化为 shell 覆盖生产 JSON。
 4. 按 [矩阵](matrix.md) 从 `ACC-01` 顺序执行。每项完成后立即记录结果、脱敏证据和日志哈希。

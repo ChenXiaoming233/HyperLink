@@ -97,6 +97,33 @@ adb logcat -d -v epoch \
 只有满足上述条件才输出 PASS，并只打印 `runId` 与 `forwardId` 的 SHA-256 前缀。归档完整
 原始日志前必须再做同一过滤与脱敏，禁止归档通知正文。
 
+## HT Hook 目标探针
+
+本步骤只服务 Issue #2，不替代 Issue #10 的功能矩阵。执行前必须使用已确认的模块签名
+证书 SHA-256 构建并安装主 APK 与 `androidTest` APK，且 LSPosed 已启用模块并作用于
+`com.milink.service` 与 `com.miui.voiceassist`。构建与安装命令见 `docs/development.md`。
+
+```bash
+HYPERLINK_ACCEPTANCE_DEVICE_OK=1 \
+ANDROID_SERIAL='<设备序列号占位>' \
+bash scripts/acceptance/probe-hook-targets.sh
+```
+
+脚本执行以下只读或进程级检查：
+
+- 要求一台匹配序列号的 online 设备、root shell 和 SELinux `Enforcing`。
+- force-stop 后启动 MiLink `ConnectivityActivity`，确认探针安装、跨设备分类存在并插入
+  `hyperlink_notification_flow` 入口。
+- force-stop VoiceAssist，先验证 Provider 冷启动且 listener 未就绪时 fail-closed。
+- 重新启动 VoiceAssist，等待 `NotificationForwardListener` 就绪，再通过 HyperLink 自身
+  UID 的 instrumentation 调用 Provider 探针，验证 UID、包名、签名、协议、规则 store、
+  目标设备状态和通知使用权状态可读取。
+- 记录 VoiceAssist 前后 PID，确认进程确实重启。
+- 比较探针前后的规则与授权文件 SHA-256，确认两者未发生变化。
+
+脚本不创建、修改或删除规则，不修改目标授权或系统通知使用权，也不发送通知。日志必须只
+保留 `HyperLinkProbe` 行和脱敏后的 Provider Bundle 摘要。
+
 ## BR 规则与授权备份恢复
 
 ### 前置检查

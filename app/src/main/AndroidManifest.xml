@@ -19,7 +19,7 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="HyperLink 通知流转设置模块骨架；当前不含真实 Hook。" />
+            android:value="HyperLink 通知流转设置；运行时探针仅验证 MiLink 入口与 VoiceAssist Provider，不含规则读写。" />
         <meta-data
             android:name="xposedminversion"
             android:value="93" />

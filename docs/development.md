@@ -1,8 +1,8 @@
 # HyperLink 开发与测试
 
 当前阶段包含可离线验证的模块骨架、领域接口、RPC 纯层、fake 场景面板、fake 安全写入
-事务层、fake 写入失败恢复、fake 结构化规则编辑器和 fake 规则生命周期控制。它不包含真实 LSPosed Hook、
-VoiceAssist Provider 接线或设备级兼容性验收。
+事务层、fake 写入失败恢复、fake 结构化规则编辑器和 fake 规则生命周期控制，以及仅供
+Hook 目标确认使用的只读运行时探针。探针不接入真实规则写入、通知发送或设备级兼容性验收。
 
 ## fake 只读面板
 
@@ -232,17 +232,61 @@ pause/resume/delete 重试复用同一 LKG、外部目标/权限变化不覆盖�
 ./gradlew --no-daemon assembleDebug
 ```
 
-生成的 APK 可安装并打开独立的 fake 状态面板与结构化编辑器。LSPosed 元数据与
-`xposed_init` 仅建立模块加载骨架；当前模块不会安装任何方法 Hook，也不会改变 MiLink 或
-VoiceAssist 行为。
+生成的 APK 可安装并打开独立的 fake 状态面板与结构化编辑器。Issue #2 的设备探针还需要
+构建并安装 instrumentation APK：
+
+```bash
+./gradlew --no-daemon assembleDebug assembleDebugAndroidTest
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+```
+
+LSPosed 元数据与 `xposed_init` 会安装 Issue #2 的只读目标探针。探针不会创建、暂停、恢复
+或删除真实规则，也不会主动发送通知。
+
+## Hook 目标运行时探针
+
+`HyperLinkModule` 现在只在两个明确入口安装探针：
+
+- MiLink：hook `ConnectivityFragment.onCreatePreferences()`，确认
+  `category_pref_key_cross_device` 存在后插入 key 为 `hyperlink_notification_flow`
+  的“通知流转”入口；点击时启动模块自有 `SettingsActivity`。
+- VoiceAssist：hook `LinkContentProvider.call()`，仅拦截自定义方法
+  `hyperlink.notificationFlow.probe.v1`。其他方法保持原实现；其他 `hyperlink.*`
+  方法返回通用无效请求。
+
+Provider 探针先按 Binder UID 解析包名与 APK 签名，再校验固定模块包名、签名证书 SHA-256
+和协议版本。认证失败时不读取 listener、规则或设备状态，也不返回这些细节。认证通过但
+`NotificationForwardListener` 尚未就绪时返回 `SERVICE_UNAVAILABLE`；就绪后只返回规则数、
+设备数、读取能力和系统通知使用权状态等脱敏摘要，不返回 `ruleId`、设备 ID 或规则内容。
+
+调试构建必须显式传入模块签名证书 SHA-256，否则 Provider 探针始终 fail-closed：
+
+```bash
+./gradlew --no-daemon \
+  -PhyperlinkProbeCallerSignerSha256='<64位证书SHA-256>' \
+  assembleDebug assembleDebugAndroidTest
+```
+
+设备侧脚本只在执行人显式确认后运行：
+
+```bash
+HYPERLINK_ACCEPTANCE_DEVICE_OK=1 \
+ANDROID_SERIAL='<设备序列号占位>' \
+bash scripts/acceptance/probe-hook-targets.sh
+```
+
+脚本通过 instrumentation 在 HyperLink 应用进程内调用 Provider，不依赖 external provider
+API；它会 force-stop 并重启 MiLink、VoiceAssist，但不写规则、不修改通知授权、不发送通知。
+运行前必须确保主 APK 与 instrumentation APK 均已安装，且 LSPosed 已启用模块并作用于两个
+目标包。日志统一以 `HyperLinkProbe` 开头，不输出规则正文、设备 ID、通知内容或厂商代码。
 
 ## 当前边界
 
 - `MiLinkEntryExtension` 是保留的未接线扩展点，不存在本地降级入口。
-- 尚无生产用的 `CallerEvidenceResolver`；它必须由平台 UID 归属、包名和签名采集实现，
-  且解析结果的 UID 必须与 Binder 调用方 UID 一致。
-- 尚无生产 Provider `call()` 适配器或真实快照 DTO 序列化。
+- `AndroidCallerEvidenceResolver` 与 Provider `call()` 探针只用于目标确认和 fail-closed
+  验证；真实设置面板与规则适配器仍未接线。
 - `RuleStoreGateway`、`LastKnownGoodStore` 目前只有 fake 实现；尚未接入 VoiceAssist
   同进程 store 或应用私有目录的持久化 LKG。`FakeRuleStore` 的共享故障态只在 JVM 内
   模拟持久化，重启恢复仍需 #5/#9 的真实持久化设计。
-- fake 状态、单元测试和编译成功均不代表真实 MiLink/VoiceAssist 集成完成。
+- fake 状态、单元测试、编译成功或探针通过均不代表真实 MiLink/VoiceAssist 业务集成完成。

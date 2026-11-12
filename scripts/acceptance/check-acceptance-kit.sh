@@ -7,6 +7,7 @@ EVIDENCE_FILE="$ROOT_DIR/docs/acceptance/evidence-template.md"
 OPERATIONS_FILE="$ROOT_DIR/docs/acceptance/operations.md"
 README_FILE="$ROOT_DIR/docs/acceptance/README.md"
 PREFLIGHT_FILE="$ROOT_DIR/scripts/acceptance/preflight-device.sh"
+PROBE_FILE="$ROOT_DIR/scripts/acceptance/probe-hook-targets.sh"
 FORWARD_VERIFIER_FILE="$ROOT_DIR/scripts/acceptance/verify-forward-attempt.sh"
 BEHAVIOR_TEST_FILE="$ROOT_DIR/scripts/acceptance/test-acceptance-kit.sh"
 FAKE_ADB_FILE="$ROOT_DIR/scripts/acceptance/test-fixtures/fake-adb"
@@ -31,6 +32,7 @@ require_file "$EVIDENCE_FILE"
 require_file "$OPERATIONS_FILE"
 require_file "$README_FILE"
 require_file "$PREFLIGHT_FILE"
+require_file "$PROBE_FILE"
 require_file "$FORWARD_VERIFIER_FILE"
 require_file "$BEHAVIOR_TEST_FILE"
 require_file "$FAKE_ADB_FILE"
@@ -149,9 +151,10 @@ do
 done
 
 for text in \
-    '不执行任何实机验收' \
+    '不自动执行任何实机验收' \
     'docs/acceptance/matrix.md' \
     'scripts/acceptance/preflight-device.sh' \
+    'scripts/acceptance/probe-hook-targets.sh' \
     'Issue #10' \
     'Issue #11'
 do
@@ -184,6 +187,28 @@ require_text "$PREFLIGHT_FILE" 'SIGNATURE_VERIFICATION=UNVERIFIED'
 require_text "$PREFLIGHT_FILE" 'SIGNATURE_VERIFICATION=VERIFIED'
 require_text "$PREFLIGHT_FILE" 'read_field_from_dump'
 require_text "$PREFLIGHT_FILE" 'read_signature_metadata'
+
+[ "$(sed -n '1p' "$PROBE_FILE")" = '#!/usr/bin/env bash' ] \
+    || fail "hook target probe must be a bash script"
+require_text "$PROBE_FILE" 'set -euo pipefail'
+require_text "$PROBE_FILE" 'HYPERLINK_ACCEPTANCE_DEVICE_OK'
+require_text "$PROBE_FILE" 'ANDROID_SERIAL'
+require_text "$PROBE_FILE" 'com.miui.circulate.world.ui.connectivitysettings.ConnectivityActivity'
+require_text "$PROBE_FILE" 'com.miui.voiceassist.contentprovider.LinkContentProvider'
+require_text "$PROBE_FILE" 'hyperlink.notificationFlow.probe.v1'
+require_text "$PROBE_FILE" 'am instrument'
+require_text "$PROBE_FILE" 'RULE_HASH_BEFORE'
+require_text "$PROBE_FILE" 'PERMISSION_HASH_BEFORE'
+require_text "$PROBE_FILE" 'STATE_UNCHANGED=PASS'
+require_text "$PROBE_FILE" 'HOOK_TARGET_CONFIRMATION=PASS'
+
+for forbidden in 'adb pull' 'adb push' 'adb install' 'adb uninstall' 'adb reboot' 'adb root' \
+    'adb remount' 'cmd notification' 'rm -' 'unlink' 'truncate'
+do
+    if grep -Fq -- "$forbidden" "$PROBE_FILE"; then
+        fail "probe-hook-targets.sh contains forbidden command: $forbidden"
+    fi
+done
 
 for script in "$PREFLIGHT_FILE" "$FORWARD_VERIFIER_FILE" "$FAKE_ADB_FILE"; do
     for forbidden in \
