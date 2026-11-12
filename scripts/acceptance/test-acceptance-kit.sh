@@ -55,75 +55,143 @@ expect_preflight_failure() {
     esac
 }
 
-current_marker='I/HyperLinkAcceptance: HyperLinkAcceptance event=forward_attempt runId=run-current timestampEpoch=1700000100 forwardId=forward-current attempt=1'
+run_verifier() {
+    local input="$1"
+    shift
+    printf '%s\n' "$input" | bash "$VERIFIER" "$@"
+}
+
+expect_verifier_failure() {
+    local description="$1"
+    local input="$2"
+    shift 2
+    if run_verifier "$input" "$@" >/dev/null 2>&1; then
+        fail "$description"
+    fi
+}
+
+current_marker='I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-current timestampEpoch=1700000100 forwardId=forward-current attempt=1'
+historical_marker='I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-old timestampEpoch=1600000000 forwardId=forward-current attempt=1'
 
 require_file "$VERIFIER"
 require_file "$PREFLIGHT"
 
 forward_pass="$(
-    printf '%s\n' "$current_marker" \
-        | bash "$VERIFIER" \
-            --run-id run-current \
-            --since 1700000000 \
-            --forward-id forward-current
+    run_verifier "$current_marker" \
+        --run-id run-current \
+        --since 1700000000 \
+        --forward-id forward-current
 )" || fail "forward verifier rejected the current-run positive case"
 case "$forward_pass" in
     *'forwardAttempts=1 attempt=1'*) ;;
     *) fail "forward verifier returned an unexpected positive result" ;;
 esac
 
-if printf '%s\n' \
-    'I/HyperLinkAcceptance: HyperLinkAcceptance event=forward_attempt runId=run-old timestampEpoch=1600000000 forwardId=forward-old attempt=1' \
-    | bash "$VERIFIER" --run-id run-current --since 1700000000 >/dev/null 2>&1
-then
-    fail "forward verifier accepted historical logs outside the current run"
-fi
+historical_pass="$(
+    run_verifier "$current_marker"$'\n'"$historical_marker" \
+        --run-id run-current \
+        --since 1700000000 \
+        --forward-id forward-current
+)" || fail "forward verifier counted an old run with the same forwardId"
+case "$historical_pass" in
+    *'forwardAttempts=1 attempt=1'*) ;;
+    *) fail "forward verifier returned an unexpected old-run result" ;;
+esac
 
-if printf '%s\n' \
-    'I/HyperLinkAcceptance: HyperLinkAcceptance event=forward_attempt runId=run-current timestampEpoch=1700000100 forwardId=forward-current attempt=1 HyperLinkAcceptance event=forward_attempt runId=run-current timestampEpoch=1700000100 forwardId=forward-current attempt=1' \
-    | bash "$VERIFIER" --run-id run-current --since 1700000000 >/dev/null 2>&1
-then
-    fail "forward verifier counted lines instead of marker occurrences"
-fi
+expect_verifier_failure \
+    "forward verifier accepted another forwardId in the current run" \
+    "$current_marker"$'\n''I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-current timestampEpoch=1700000101 forwardId=forward-other attempt=1' \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-current
 
-if printf '%s\n' \
-    'I/HyperLinkAcceptance: HyperLinkAcceptance event=forward_attempt runId=run-current timestampEpoch=1700000100 forwardId=forward-current forwardId=forward-current attempt=1' \
-    | bash "$VERIFIER" --run-id run-current >/dev/null 2>&1
-then
-    fail "forward verifier accepted duplicate forwardId tokens"
-fi
+expect_verifier_failure \
+    "forward verifier counted lines instead of marker occurrences" \
+    'I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-current timestampEpoch=1700000100 forwardId=forward-current attempt=1 HyperLinkAcceptance forward_attempt runId=run-current timestampEpoch=1700000100 forwardId=forward-current attempt=1' \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-current
 
-if printf '%s\n' \
-    'I/HyperLinkAcceptance: HyperLinkAcceptance event=forward_attempt runId=run-current timestampEpoch=1700000100 forwardId=forward-current attempt=1 attempt=2' \
-    | bash "$VERIFIER" --run-id run-current >/dev/null 2>&1
-then
-    fail "forward verifier accepted multiple attempt tokens"
-fi
+expect_verifier_failure \
+    "forward verifier accepted duplicate forwardId tokens" \
+    'I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-current timestampEpoch=1700000100 forwardId=forward-current forwardId=forward-current attempt=1' \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-current
 
-if printf '%s\n%s\n' \
-    "$current_marker" \
-    'I/HyperLinkAcceptance: HyperLinkAcceptance event=forward_attempt runId=run-current timestampEpoch=1700000101 forwardId=forward-current attempt=2' \
-    | bash "$VERIFIER" --run-id run-current >/dev/null 2>&1
-then
-    fail "forward verifier accepted attempt=1 plus attempt=2"
-fi
+expect_verifier_failure \
+    "forward verifier accepted multiple attempt tokens" \
+    'I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-current timestampEpoch=1700000100 forwardId=forward-current attempt=1 attempt=2' \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-current
 
-if printf '%s\n' "$current_marker" | bash "$VERIFIER" >/dev/null 2>&1; then
-    fail "forward verifier accepted input without an explicit run scope"
-fi
+expect_verifier_failure \
+    "forward verifier accepted attempt=1 plus attempt=2" \
+    "$current_marker"$'\n''I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-current timestampEpoch=1700000101 forwardId=forward-current attempt=2' \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-current
 
-if printf '%s\n' "$current_marker" \
-    | bash "$VERIFIER" --forward-id forward-other >/dev/null 2>&1
-then
-    fail "forward verifier accepted a forwardId mismatch"
-fi
+expect_verifier_failure \
+    "forward verifier accepted an attempted token" \
+    'I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempted runId=run-current timestampEpoch=1700000100 forwardId=forward-current attempt=1' \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-current
 
-if printf '%s\n' \
+expect_verifier_failure \
+    "forward verifier accepted input without a marker" \
     'I/HyperLinkAcceptance: unrelated line without a marker' \
-    | bash "$VERIFIER" --run-id run-current >/dev/null 2>&1
-then
-    fail "forward verifier accepted input without a marker"
-fi
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-current
+
+expect_verifier_failure \
+    "forward verifier accepted a forwardId mismatch" \
+    "$current_marker" \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-other
+
+expect_verifier_failure \
+    "forward verifier accepted a missing --run-id" \
+    "$current_marker" \
+    --since 1700000000 \
+    --forward-id forward-current
+
+expect_verifier_failure \
+    "forward verifier accepted a missing --since" \
+    "$current_marker" \
+    --run-id run-current \
+    --forward-id forward-current
+
+expect_verifier_failure \
+    "forward verifier accepted a missing --forward-id" \
+    "$current_marker" \
+    --run-id run-current \
+    --since 1700000000
+
+expect_verifier_failure \
+    "forward verifier accepted an empty --run-id" \
+    "$current_marker" \
+    --run-id '' \
+    --since 1700000000 \
+    --forward-id forward-current
+
+expect_verifier_failure \
+    "forward verifier accepted an empty --since" \
+    "$current_marker" \
+    --run-id run-current \
+    --since '' \
+    --forward-id forward-current
+
+expect_verifier_failure \
+    "forward verifier accepted an empty --forward-id" \
+    "$current_marker" \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id ''
 
 preflight_success="$(
     run_preflight success env \

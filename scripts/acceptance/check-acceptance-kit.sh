@@ -137,7 +137,10 @@ for text in \
     '--since' \
     '--forward-id' \
     '按标记出现次数' \
-    '人工审批'
+    '人工审批' \
+    '必须同时' \
+    '不得先按 `--forward-id` 过滤' \
+    'forward_attempted'
 do
     require_text "$OPERATIONS_FILE" "$text"
 done
@@ -236,26 +239,36 @@ awk '
     END { exit bad }
 ' "$PREFLIGHT_FILE" || fail "preflight adb allowlist validation failed"
 
-require_text "$FORWARD_VERIFIER_FILE" 'HyperLinkAcceptance event=forward_attempt'
+require_text "$FORWARD_VERIFIER_FILE" "MARKER='forward_attempt'"
 require_text "$FORWARD_VERIFIER_FILE" 'forwardId'
 require_text "$FORWARD_VERIFIER_FILE" 'attempt='
 require_text "$FORWARD_VERIFIER_FILE" '--run-id'
 require_text "$FORWARD_VERIFIER_FILE" '--since'
 require_text "$FORWARD_VERIFIER_FILE" '--forward-id'
 require_text "$FORWARD_VERIFIER_FILE" 'timestampEpoch'
-require_text "$FORWARD_VERIFIER_FILE" 'split($0, segments, marker)'
-require_text "$FORWARD_VERIFIER_FILE" 'selected != 1'
+require_text "$FORWARD_VERIFIER_FILE" 'tokens[token_index] != marker'
+require_text "$FORWARD_VERIFIER_FILE" 'selected_forward != expected_forward_id'
+require_text "$FORWARD_VERIFIER_FILE" '--run-id is required'
+require_text "$FORWARD_VERIFIER_FILE" '--since is required'
+require_text "$FORWARD_VERIFIER_FILE" '--forward-id is required'
 if grep -Fq 'adb ' "$FORWARD_VERIFIER_FILE"; then
     fail "forward-attempt verifier must consume stdin and not issue device commands"
 fi
 
 for text in \
-    'historical logs outside the current run' \
+    'another forwardId in the current run' \
+    'old run with the same forwardId' \
     'counted lines instead of marker occurrences' \
     'duplicate forwardId tokens' \
     'multiple attempt tokens' \
     'attempt=1 plus attempt=2' \
-    'without an explicit run scope' \
+    'attempted token' \
+    'missing --run-id' \
+    'missing --since' \
+    'missing --forward-id' \
+    'empty --run-id' \
+    'empty --since' \
+    'empty --forward-id' \
     'pid-missing-voiceassist' \
     'pid-missing-milink' \
     'signature-unverified' \
@@ -266,6 +279,9 @@ for text in \
 do
     require_text "$BEHAVIOR_TEST_FILE" "$text"
 done
+
+require_text "$BEHAVIOR_TEST_FILE" 'expect_verifier_failure'
+require_text "$BEHAVIOR_TEST_FILE" 'if run_verifier "$input" "$@"'
 
 require_text "$FAKE_ADB_FILE" 'certificateHex=01020304'
 require_text "$FAKE_ADB_FILE" 'multiple-devices'

@@ -48,7 +48,7 @@ SHA-256 并与预登记值比较，输出 `SIGNATURE_VERIFICATION=VERIFIED` 或
 真实接线必须只在一次实际 A2A 投递开始时写一条不含敏感内容的标记：
 
 ```text
-HyperLinkAcceptance event=forward_attempt runId=<本次唯一不透明ID> timestampEpoch=<Unix秒> forwardId=<通知唯一不透明ID> attempt=<正整数>
+HyperLinkAcceptance forward_attempt runId=<本次唯一不透明ID> timestampEpoch=<Unix秒> forwardId=<通知唯一不透明ID> attempt=<正整数>
 ```
 
 - 载入规则、渲染 UI、预览、排队和普通状态变化不得写该标记。
@@ -64,28 +64,34 @@ HyperLinkAcceptance event=forward_attempt runId=<本次唯一不透明ID> timest
 执行人手动生成一条无敏感内容的合成通知，同时只过滤标记行：
 
 ```bash
-adb logcat -v threadtime | grep --line-buffered 'HyperLinkAcceptance event=forward_attempt'
+adb logcat -v threadtime | grep --line-buffered 'HyperLinkAcceptance forward_attempt'
 ```
 
-测试结束后将同一过滤结果交给仓库校验器。校验器只从标准输入读取，不连接设备，且至少要求
-`--run-id`、`--since`、`--forward-id` 之一：
+测试结束后将同一过滤结果交给仓库校验器。校验器只从标准输入读取，不连接设备，且必须同时
+提供 `--run-id`、`--since`、`--forward-id`；任一缺失或为空值都会非零退出：
 
 ```bash
 adb logcat -d -v epoch \
-  | grep 'HyperLinkAcceptance event=forward_attempt' \
+  | grep 'HyperLinkAcceptance forward_attempt' \
   | bash scripts/acceptance/verify-forward-attempt.sh \
       --run-id '<本次唯一 runId 占位>' \
       --since '<本次开始 epoch 占位>' \
       --forward-id '<预期 forwardId 占位>'
 ```
 
-`--run-id`、`--since` 与 `--forward-id` 可同时使用，过滤条件按 AND 组合。输入中的历史标记
-若不属于当前范围会被忽略；当前范围没有任何标记、出现多个标记、同一行重复标记、重复
-`forwardId` 标记或 `attempt=1` 加 `attempt=2` 都会失败。
+校验器先按 `runId` 和 `timestampEpoch` 时间窗选出 current-run 的全部 `forward_attempt`
+标记，包含不同 `forwardId` 的标记；不得先按 `--forward-id` 过滤。随后按标记出现次数统计：
 
-校验器按标记出现次数而非行数统计。只有当前范围恰好 1 个标记、唯一 `forwardId`、恰好 1 个
-`attempt` 标记且值为 1 时输出 PASS，并只打印 `runId` 与 `forwardId` 的 SHA-256 前缀。
-归档完整原始日志前必须再做同一过滤与脱敏，禁止归档通知正文。
+- 当前 run 总数必须恰好为 1，且该唯一标记的 `forwardId` 必须等于 `--forward-id`。
+- 同名旧 run 即使 `forwardId` 相同也不计数，但不匹配 run 或时间窗的历史标记不能掩盖当前
+  run 的重复投递。
+- 同一行出现多个标记、任一字段重复、`attempt` 不为 1，或 current-run 同时出现 expected 与
+  其他 `forwardId` 都会失败。
+- 标记 token 必须精确等于 `forward_attempt`；`forward_attempted` 等相似 token 不计数。
+- 所有三项 scope 必须显式提供；没有 current-run 标记或字段不完整同样失败。
+
+只有满足上述条件才输出 PASS，并只打印 `runId` 与 `forwardId` 的 SHA-256 前缀。归档完整
+原始日志前必须再做同一过滤与脱敏，禁止归档通知正文。
 
 ## BR 规则与授权备份恢复
 
@@ -118,8 +124,8 @@ adb logcat -d -v epoch \
   目标进程消失或 PID 为空。
 - 任何工具要求直接写生产 JSON、绕过认证、强制保存或强制删除。
 - 读取失败、哈希不可得、LKG 不可读回、回滚结果无法验证。
-- 受控通知没有当前 run 标记、出现多个标记、多个 `forwardId`、重复 attempt 标记或任何
-  `attempt` 大于 1。
+- 受控通知没有当前 run 标记、出现多个标记、current-run 出现多个 `forwardId`、重复字段、
+  `forward_attempted` 冒充标记、重复 attempt 标记或任何 `attempt` 大于 1。
 
 安全退出顺序：
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MARKER='HyperLinkAcceptance event=forward_attempt'
+MARKER='forward_attempt'
 RUN_ID=''
 SINCE=''
 EXPECTED_FORWARD_ID=''
@@ -13,8 +13,7 @@ fail() {
 
 usage() {
     printf '%s\n' \
-        'usage: verify-forward-attempt.sh [--run-id ID] [--since EPOCH_SECONDS] [--forward-id ID]' \
-        'At least one scope option is required. Multiple options are combined with AND.'
+        'usage: verify-forward-attempt.sh --run-id ID --since EPOCH_SECONDS --forward-id ID'
 }
 
 while [ "$#" -gt 0 ]; do
@@ -45,16 +44,15 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-[ -n "$RUN_ID" ] || [ -n "$SINCE" ] || [ -n "$EXPECTED_FORWARD_ID" ] \
-    || fail 'provide --run-id, --since, or --forward-id to reject historical logs'
+[ -n "$RUN_ID" ] || fail '--run-id is required and must not be empty'
+[ -n "$SINCE" ] || fail '--since is required and must not be empty'
+[ -n "$EXPECTED_FORWARD_ID" ] || fail '--forward-id is required and must not be empty'
 case "$RUN_ID$EXPECTED_FORWARD_ID" in
     *[[:space:]]*) fail 'run and forward IDs must not contain whitespace' ;;
 esac
-if [ -n "$SINCE" ]; then
-    case "$SINCE" in
-        *[!0-9]*) fail '--since must be Unix epoch seconds' ;;
-    esac
-fi
+case "$SINCE" in
+    *[!0-9]*) fail '--since must be Unix epoch seconds' ;;
+esac
 
 input="$(cat)"
 if ! result="$(
@@ -63,73 +61,80 @@ if ! result="$(
             -v run_id="$RUN_ID" \
             -v since="$SINCE" \
             -v expected_forward_id="$EXPECTED_FORWARD_ID" '
-            function token_count(text, key,    tmp, pattern) {
-                pattern = "(^|[[:space:]])" key "=[^[:space:]]+"
-                tmp = text
-                return gsub(pattern, "&", tmp)
-            }
-            function token_value(text, key,    tmp, found, pattern) {
-                pattern = "(^|[[:space:]])" key "=[^[:space:]]+"
-                tmp = text
-                if (!match(tmp, pattern)) {
-                    return ""
-                }
-                found = substr(tmp, RSTART, RLENGTH)
-                sub("^[[:space:]]*", "", found)
-                sub("^" key "=", "", found)
-                return found
-            }
             {
-                segment_count = split($0, segments, marker)
-                if (segment_count <= 1) {
-                    next
-                }
-                for (part = 2; part <= segment_count; part++) {
-                    segment = segments[part]
-                    run = token_value(segment, "runId")
-                    timestamp = token_value(segment, "timestampEpoch")
-                    forward = token_value(segment, "forwardId")
-                    if (run_id != "" && run != run_id) {
+                token_total = split($0, tokens, /[[:space:]]+/)
+                for (token_index = 1; token_index <= token_total; token_index++) {
+                    if (tokens[token_index] != marker) {
                         continue
                     }
-                    if (since != "" && timestamp !~ /^[0-9]+$/) {
-                        continue
+
+                    run_count = 0
+                    timestamp_count = 0
+                    forward_count = 0
+                    attempt_count = 0
+                    run = ""
+                    timestamp = ""
+                    forward = ""
+                    attempt = ""
+                    for (field_index = token_index + 1; field_index <= token_total; field_index++) {
+                        if (tokens[field_index] == marker) {
+                            break
+                        }
+                        if (tokens[field_index] ~ /^runId=/) {
+                            run_count++
+                            if (run_count == 1) {
+                                run = tokens[field_index]
+                                sub(/^runId=/, "", run)
+                            }
+                        } else if (tokens[field_index] ~ /^timestampEpoch=/) {
+                            timestamp_count++
+                            if (timestamp_count == 1) {
+                                timestamp = tokens[field_index]
+                                sub(/^timestampEpoch=/, "", timestamp)
+                            }
+                        } else if (tokens[field_index] ~ /^forwardId=/) {
+                            forward_count++
+                            if (forward_count == 1) {
+                                forward = tokens[field_index]
+                                sub(/^forwardId=/, "", forward)
+                            }
+                        } else if (tokens[field_index] ~ /^attempt=/) {
+                            attempt_count++
+                            if (attempt_count == 1) {
+                                attempt = tokens[field_index]
+                                sub(/^attempt=/, "", attempt)
+                            }
+                        }
                     }
-                    if (since != "" && timestamp + 0 < since + 0) {
-                        continue
-                    }
-                    if (expected_forward_id != "" && forward != expected_forward_id) {
+
+                    if (run != run_id || timestamp !~ /^[0-9]+$/ || timestamp + 0 < since + 0) {
                         continue
                     }
 
                     selected++
-                    if (token_count(segment, "runId") != 1 || token_count(segment, "timestampEpoch") != 1 || token_count(segment, "forwardId") != 1 || token_count(segment, "attempt") != 1) {
+                    if (run_count != 1 || timestamp_count != 1 || forward_count != 1 || attempt_count != 1) {
                         bad = 1
                     }
-                    if (run == "" || forward == "" || timestamp !~ /^[0-9]+$/) {
-                        bad = 1
-                    }
-                    attempt = token_value(segment, "attempt")
-                    if (attempt !~ /^[0-9]+$/ || attempt + 0 != 1) {
+                    if (run == "" || forward == "" || attempt !~ /^[0-9]+$/ || attempt + 0 != 1) {
                         bad = 1
                     }
                     if (selected == 1) {
                         selected_run = run
                         selected_forward = forward
-                    } else if (run != selected_run || forward != selected_forward) {
+                    } else if (forward != selected_forward) {
                         bad = 1
                     }
                 }
             }
             END {
-                if (selected != 1 || bad || selected_run == "" || selected_forward == "") {
+                if (selected != 1 || bad || selected_run == "" || selected_forward == "" || selected_forward != expected_forward_id) {
                     exit 42
                 }
                 print selected_run "\t" selected_forward
             }
         '
 )"; then
-    fail 'expected exactly one scoped forward_attempt occurrence with one runId, one timestamp, one forwardId, and one attempt=1'
+    fail 'expected exactly one current-run forward_attempt token with unique fields, attempt=1, and the expected forwardId'
 fi
 
 selected_run_id="${result%%$'\t'*}"
