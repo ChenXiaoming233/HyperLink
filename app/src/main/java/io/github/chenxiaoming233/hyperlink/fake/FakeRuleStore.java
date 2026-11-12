@@ -44,6 +44,11 @@ public final class FakeRuleStore {
         }
     }
 
+    public synchronized void clearReadOnlyFaultAfterVerifiedRollback() {
+        memoryReadOnlyFaultMessage = "";
+        snapshot = snapshot.withReadOnlyFault("");
+    }
+
     public synchronized String readOnlyFaultMessage() {
         String persistent = snapshot.readOnlyFaultMessage();
         return persistent.isEmpty() ? memoryReadOnlyFaultMessage : persistent;

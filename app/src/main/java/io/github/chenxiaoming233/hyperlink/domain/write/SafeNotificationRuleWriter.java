@@ -8,6 +8,7 @@ import io.github.chenxiaoming233.hyperlink.domain.ServiceResult;
 import io.github.chenxiaoming233.hyperlink.domain.TargetDevice;
 import io.github.chenxiaoming233.hyperlink.domain.editor.StructuredRuleDraft;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -108,6 +109,16 @@ public final class SafeNotificationRuleWriter {
 
     private ServiceResult<RuleCreationResult> writeRuleLocked(
             ConfirmedTargetSelection selection, RuleFactory ruleFactory) {
+        ServiceResult<PreparedRuleWrite> prepared =
+                prepareRuleWriteLocked(selection, ruleFactory);
+        if (!prepared.isSuccess()) {
+            return ServiceResult.failure(prepared.userMessage());
+        }
+        return commitPreparedWrite(prepared.value().orElseThrow());
+    }
+
+    private ServiceResult<PreparedRuleWrite> prepareRuleWriteLocked(
+            ConfirmedTargetSelection selection, RuleFactory ruleFactory) {
         if (selection == null) {
             return ServiceResult.failure("未确认目标，未执行任何写入。");
         }
@@ -129,8 +140,6 @@ public final class SafeNotificationRuleWriter {
         if (!current.readOnlyFaultMessage().isEmpty()) {
             return ServiceResult.failure(current.readOnlyFaultMessage());
         }
-        long expectedStoreVersion = current.storeVersion();
-        List<NotificationRule> expectedRules = current.rules();
         NotificationFlowSnapshot flow = current.flowSnapshot();
         if (flow.staleCache()
                 || (flow.connectionState() != ConnectionState.CONNECTED
@@ -184,16 +193,42 @@ public final class SafeNotificationRuleWriter {
             return ServiceResult.failure("无法生成有效规则，未执行任何写入。");
         }
 
+        boolean compatibilityUnverified =
+                capability.compatibilityUnverified() || flow.compatibilityUnverified();
+        return ServiceResult.success(
+                new PreparedRuleWrite(
+                        current,
+                        lkg,
+                        createdRule,
+                        candidate,
+                        expectedSerialized,
+                        target,
+                        compatibilityUnverified,
+                        selection.offlineWarning(),
+                        "规则写入"));
+    }
+
+    private ServiceResult<RuleCreationResult> commitPreparedWrite(
+            PreparedRuleWrite plan) {
+        return commitPreparedWriteFrom(plan, plan.initial);
+    }
+
+    private ServiceResult<RuleCreationResult> commitPreparedWriteFrom(
+            PreparedRuleWrite plan, RuleStoreSnapshot writeBaseline) {
         ServiceResult<RuleWriteReceipt> writeResult;
         try {
-            writeResult = gateway.write(candidate, expectedStoreVersion, expectedRules);
+            writeResult =
+                    gateway.write(
+                            plan.candidate,
+                            writeBaseline.storeVersion(),
+                            writeBaseline.rules());
         } catch (RuntimeException exception) {
             return failAfterWriteAttempt(
-                    lkg, current, "规则写入异常，");
+                    plan.lkg, writeBaseline, plan.failurePrefix + "异常，");
         }
         if (!writeResult.isSuccess()) {
             return failAfterWriteAttempt(
-                    lkg, current, "规则写入未完成，");
+                    plan.lkg, writeBaseline, plan.failurePrefix + "未完成，");
         }
         RuleWriteReceipt receipt = writeResult.value().orElseThrow();
 
@@ -202,46 +237,47 @@ public final class SafeNotificationRuleWriter {
             readBack = gateway.read();
         } catch (RuntimeException exception) {
             return failAfterCommittedReadFailure(
-                    lkg, receipt, "写入后回读异常，");
+                    plan.lkg, receipt, "写入后回读异常，");
         }
         if (!readBack.isSuccess()) {
             return failAfterCommittedReadFailure(
-                    lkg, receipt, "写入后无法回读规则，");
+                    plan.lkg, receipt, "写入后无法回读规则，");
         }
         RuleStoreSnapshot verified = readBack.value().orElseThrow();
         if (!verified.readOnlyFaultMessage().isEmpty()
                 || verified.storeVersion() != receipt.storeVersion()
                 || hasUnsafeStructure(verified)
-                || !lkg.targetStatesMatch(verified)
-                || !lkg.permissionsMatch(verified)
-                || !receipt.serializedJson().equals(expectedSerialized)
-                || !verified.serializedJson().equals(expectedSerialized)
-                || !matchesRules(candidate, verified.rules())
-                || !uniqueRuleIds(candidate)
-                || matchingTargetCount(candidate, createdRule) != 1
-                || !targetRuleMatches(candidate, createdRule)) {
+                || !plan.lkg.targetStatesMatch(verified)
+                || !plan.lkg.permissionsMatch(verified)
+                || !receipt.serializedJson().equals(plan.expectedSerialized)
+                || !verified.serializedJson().equals(plan.expectedSerialized)
+                || !matchesRules(plan.candidate, verified.rules())
+                || !uniqueRuleIds(plan.candidate)
+                || matchingTargetCount(plan.candidate, plan.createdRule) != 1
+                || !targetRuleMatches(plan.candidate, plan.createdRule)) {
             return failAfterCommittedWrite(
-                    lkg, receipt, verified, "写入后校验失败，");
+                    plan.lkg, receipt, verified, "写入后校验失败，");
         }
         if (!readOnlyFaultMessageLocked().isEmpty()) {
             return failAfterCommittedWrite(
-                    lkg, receipt, verified, "写入返回前只读故障态已变化，");
+                    plan.lkg, receipt, verified, "写入返回前只读故障态已变化，");
         }
 
+        return ServiceResult.success(creationResult(plan));
+    }
+
+    private RuleCreationResult creationResult(PreparedRuleWrite plan) {
         List<String> notes = new ArrayList<>();
-        notes.add(systemGateNotice(flow.notificationAccess()));
-        notes.add(targetCapabilityNotice(target));
-        if (!selection.offlineWarning().isEmpty()) {
-            notes.add(selection.offlineWarning());
+        notes.add(systemGateNotice(plan.initial.flowSnapshot().notificationAccess()));
+        notes.add(targetCapabilityNotice(plan.target));
+        if (!plan.offlineWarning.isEmpty()) {
+            notes.add(plan.offlineWarning);
         }
-        boolean compatibilityUnverified =
-                capability.compatibilityUnverified() || flow.compatibilityUnverified();
-        if (compatibilityUnverified) {
+        if (plan.compatibilityUnverified) {
             notes.add("兼容性未经完整验收：运行时能力探测已通过，但当前 VoiceAssist 版本未完成完整验收。");
         }
-        return ServiceResult.success(
-                new RuleCreationResult(
-                        createdRule, lkg, compatibilityUnverified, notes));
+        return new RuleCreationResult(
+                plan.createdRule, plan.lkg, plan.compatibilityUnverified, notes);
     }
 
     public boolean isReadOnlyFault() {
@@ -265,6 +301,326 @@ public final class SafeNotificationRuleWriter {
     public void enterReadOnlyFault(String message) {
         synchronized (PROCESS_WRITE_LOCK) {
             gateway.enterReadOnlyFault(Objects.requireNonNull(message, "message"));
+        }
+    }
+
+    RecoverableWriteAttempt attemptStructuredRuleRecovery(
+            ConfirmedTargetSelection selection, StructuredRuleDraft draft) {
+        synchronized (PROCESS_WRITE_LOCK) {
+            if (draft == null) {
+                return RecoverableWriteAttempt.failed(
+                        "未提供结构化规则，未执行任何写入。");
+            }
+            ServiceResult<PreparedRuleWrite> prepared =
+                    prepareRuleWriteLocked(
+                            selection,
+                            (source, target, rules) ->
+                                    createStructuredRule(source, target, rules, draft));
+            if (!prepared.isSuccess()) {
+                return RecoverableWriteAttempt.failed(prepared.userMessage());
+            }
+            return attemptPreparedWriteRecovery(prepared.value().orElseThrow());
+        }
+    }
+
+    RecoverableWriteAttempt attemptAllNotificationsRuleRecovery(
+            ConfirmedTargetSelection selection) {
+        synchronized (PROCESS_WRITE_LOCK) {
+            ServiceResult<PreparedRuleWrite> prepared =
+                    prepareRuleWriteLocked(
+                            selection,
+                            (source, target, rules) ->
+                                    createRule(source, target, rules));
+            if (!prepared.isSuccess()) {
+                return RecoverableWriteAttempt.failed(prepared.userMessage());
+            }
+            return attemptPreparedWriteRecovery(prepared.value().orElseThrow());
+        }
+    }
+
+    private RecoverableWriteAttempt attemptPreparedWriteRecovery(
+            PreparedRuleWrite plan) {
+        ServiceResult<RuleWriteReceipt> writeResult;
+        try {
+            writeResult =
+                    gateway.write(
+                            plan.candidate,
+                            plan.initial.storeVersion(),
+                            plan.initial.rules());
+        } catch (RuntimeException exception) {
+            return RecoverableWriteAttempt.failed(
+                    failAfterWriteAttempt(
+                                    plan.lkg,
+                                    plan.initial,
+                                    plan.failurePrefix + "异常，")
+                            .userMessage());
+        }
+        if (!writeResult.isSuccess()) {
+            return RecoverableWriteAttempt.failed(
+                    failAfterWriteAttempt(
+                                    plan.lkg,
+                                    plan.initial,
+                                    plan.failurePrefix + "未完成，")
+                            .userMessage());
+        }
+        RuleWriteReceipt receipt = writeResult.value().orElseThrow();
+
+        ServiceResult<RuleStoreSnapshot> readBack;
+        try {
+            readBack = gateway.read();
+        } catch (RuntimeException exception) {
+            return RecoverableWriteAttempt.failed(
+                    failAfterCommittedReadFailure(
+                                    plan.lkg, receipt, "写入后回读异常，")
+                            .userMessage());
+        }
+        if (!readBack.isSuccess()) {
+            return RecoverableWriteAttempt.failed(
+                    failAfterCommittedReadFailure(
+                                    plan.lkg, receipt, "写入后无法回读规则，")
+                            .userMessage());
+        }
+        RuleStoreSnapshot observed = readBack.value().orElseThrow();
+        boolean receiptWasVerified =
+                observed.serializedJson().equals(receipt.serializedJson());
+        boolean externalStateChanged =
+                receiptWasVerified
+                        && (observed.storeVersion() != receipt.storeVersion()
+                                || !plan.lkg.targetStatesMatch(observed)
+                                || !plan.lkg.permissionsMatch(observed));
+        if (!observed.readOnlyFaultMessage().isEmpty() || externalStateChanged) {
+            return RecoverableWriteAttempt.failed(
+                    failAfterCommittedWrite(
+                                    plan.lkg,
+                                    receipt,
+                                    observed,
+                                    "写入后校验失败，")
+                            .userMessage());
+        }
+        boolean structuralFailure =
+                hasUnsafeStructure(observed)
+                        || !receipt.serializedJson().equals(plan.expectedSerialized)
+                        || !observed.serializedJson().equals(plan.expectedSerialized)
+                        || !matchesRules(plan.candidate, observed.rules())
+                        || !uniqueRuleIds(plan.candidate)
+                        || matchingTargetCount(plan.candidate, plan.createdRule) != 1
+                        || !targetRuleMatches(plan.candidate, plan.createdRule);
+        if (structuralFailure) {
+            return RecoverableWriteAttempt.recoverable(
+                    plan,
+                    observed,
+                    "写入后校验失败；已保留第一次写入前 LKG。"
+                            + "推荐立即回滚；也可重新读取并验证当前状态后进行一次受控重试。");
+        }
+        if (!readOnlyFaultMessageLocked().isEmpty()) {
+            return RecoverableWriteAttempt.failed(
+                    failAfterCommittedWrite(
+                                    plan.lkg,
+                                    receipt,
+                                    observed,
+                                    "写入返回前只读故障态已变化，")
+                            .userMessage());
+        }
+        return RecoverableWriteAttempt.success(creationResult(plan));
+    }
+
+    RecoveryRetryAttempt retryPreparedWriteRecovery(
+            PreparedRuleWrite plan,
+            RuleStoreSnapshot failedSnapshot,
+            boolean skipPreRetryValidation) {
+        synchronized (PROCESS_WRITE_LOCK) {
+            ServiceResult<RuleStoreSnapshot> readResult;
+            try {
+                readResult = gateway.read();
+            } catch (RuntimeException exception) {
+                return RecoveryRetryAttempt.notAttempted(
+                        "当前状态无法读取，受控重试已禁止。");
+            }
+            if (!readResult.isSuccess()) {
+                return RecoveryRetryAttempt.notAttempted(
+                        "当前状态无法读取，受控重试已禁止。");
+            }
+            RuleStoreSnapshot current = readResult.value().orElseThrow();
+            String mandatoryIssue = mandatoryRecoveryIssue(plan, current);
+            if (!mandatoryIssue.isEmpty()) {
+                return RecoveryRetryAttempt.notAttempted(mandatoryIssue);
+            }
+            if (!skipPreRetryValidation
+                    && !sameRecoveryState(failedSnapshot, current)) {
+                return RecoveryRetryAttempt.notAttempted(
+                        "当前状态不安全：写入失败后的 store 已被外部更新，受控重试已禁止。");
+            }
+
+            ServiceResult<RuleCreationResult> result =
+                    commitPreparedWriteFrom(plan, current);
+            if (result.isSuccess()) {
+                return RecoveryRetryAttempt.succeeded(result.value().orElseThrow());
+            }
+            return RecoveryRetryAttempt.failed(
+                    result.userMessage(), !readOnlyFaultMessageLocked().isEmpty());
+        }
+    }
+
+    RecoveryInspection inspectPreparedWriteRecovery(
+            PreparedRuleWrite plan,
+            RuleStoreSnapshot failedSnapshot,
+            boolean skipPreRetryValidation) {
+        synchronized (PROCESS_WRITE_LOCK) {
+            ServiceResult<RuleStoreSnapshot> readResult;
+            try {
+                readResult = gateway.read();
+            } catch (RuntimeException exception) {
+                return new RecoveryInspection(false, false, "当前状态无法读取，受控重试已禁止。");
+            }
+            if (!readResult.isSuccess()) {
+                return new RecoveryInspection(false, false, "当前状态无法读取，受控重试已禁止。");
+            }
+            RuleStoreSnapshot current = readResult.value().orElseThrow();
+            String mandatoryIssue = mandatoryRecoveryIssue(plan, current);
+            if (!mandatoryIssue.isEmpty()) {
+                return new RecoveryInspection(false, false, mandatoryIssue);
+            }
+            if (!skipPreRetryValidation
+                    && !sameRecoveryState(failedSnapshot, current)) {
+                return new RecoveryInspection(
+                        false,
+                        true,
+                        "当前状态不安全：写入失败后的 store 已被外部更新，受控重试已禁止。");
+            }
+            return new RecoveryInspection(true, true, "");
+        }
+    }
+
+    RecoveryRollbackAttempt rollbackPreparedWriteRecovery(
+            PreparedRuleWrite plan, RuleStoreSnapshot failedSnapshot) {
+        synchronized (PROCESS_WRITE_LOCK) {
+            ServiceResult<RuleStoreSnapshot> readResult;
+            try {
+                readResult = gateway.read();
+            } catch (RuntimeException exception) {
+                return RecoveryRollbackAttempt.failed(
+                        enterRecoveryFault(
+                                "无法验证回滚：当前规则状态不可读取，请重新检测或再次尝试回滚。"));
+            }
+            if (!readResult.isSuccess()) {
+                return RecoveryRollbackAttempt.failed(
+                        enterRecoveryFault(
+                                "无法验证回滚：当前规则状态不可读取，请重新检测或再次尝试回滚。"));
+            }
+            RuleStoreSnapshot current = readResult.value().orElseThrow();
+            boolean persistentFault = !current.readOnlyFaultMessage().isEmpty();
+            if (!matchesRules(current.rules(), failedSnapshot.rules())
+                    || (!persistentFault
+                            && current.storeVersion() != failedSnapshot.storeVersion())) {
+                return RecoveryRollbackAttempt.failed(
+                        enterRecoveryFault(
+                                "回滚前检测到规则 store 已发生外部变化，"
+                                        + "未覆盖外部规则，请重新检测或再次尝试回滚。"));
+            }
+            boolean verified =
+                    persistentFault
+                            ? rollbackRulesOnlyAndVerifyRecovery(plan.lkg, current)
+                            : rollbackRulesOnlyAndVerify(plan.lkg, current);
+            if (!verified) {
+                return RecoveryRollbackAttempt.failed(
+                        enterRecoveryFault(
+                                "无法验证回滚：原状态恢复校验失败，"
+                                        + "请重新检测或再次尝试回滚。"));
+            }
+            return RecoveryRollbackAttempt.success();
+        }
+    }
+
+    private boolean rollbackRulesOnlyAndVerifyRecovery(
+            RuleLkg lkg, RuleStoreSnapshot beforeRollback) {
+        RuleLkg preservedState = RuleLkg.capture(beforeRollback);
+        ServiceResult<RuleWriteReceipt> rollbackWrite;
+        try {
+            rollbackWrite =
+                    gateway.restoreRulesForVerifiedRecovery(
+                            lkg,
+                            beforeRollback.storeVersion(),
+                            beforeRollback.rules());
+        } catch (RuntimeException exception) {
+            return false;
+        }
+        if (!rollbackWrite.isSuccess()
+                || !rollbackWrite
+                        .value()
+                        .orElseThrow()
+                        .serializedJson()
+                        .equals(lkg.serializedJson())) {
+            return false;
+        }
+        ServiceResult<RuleStoreSnapshot> readBack;
+        try {
+            readBack = gateway.read();
+        } catch (RuntimeException exception) {
+            return false;
+        }
+        if (!readBack.isSuccess()) {
+            return false;
+        }
+        RuleStoreSnapshot verified = readBack.value().orElseThrow();
+        return !hasUnsafeStructure(verified)
+                && verified.readOnlyFaultMessage().isEmpty()
+                && readOnlyFaultMessageLocked().isEmpty()
+                && preservedState.targetStatesMatch(verified)
+                && preservedState.permissionsMatch(verified)
+                && verified.serializedJson().equals(lkg.serializedJson())
+                && matchesRules(lkg.rules(), verified.rules())
+                && uniqueRuleIds(verified.rules());
+    }
+
+    private String mandatoryRecoveryIssue(
+            PreparedRuleWrite plan, RuleStoreSnapshot current) {
+        if (!current.readOnlyFaultMessage().isEmpty()) {
+            return "当前处于持久只读故障态，受控重试已禁止。";
+        }
+        NotificationFlowSnapshot flow = current.flowSnapshot();
+        if (flow.staleCache()
+                || (flow.connectionState() != ConnectionState.CONNECTED
+                        && flow.connectionState()
+                                != ConnectionState.COMPATIBILITY_UNVERIFIED)) {
+            return "当前规则快照不可用于重试。";
+        }
+        CapabilityReport capability = CapabilityProbe.evaluate(current.capabilities());
+        if (!capability.passed()) {
+            return capability.readOnlyMessage() + " 调试模式不会绕过能力探测。";
+        }
+        String snapshotIssue = RuleSnapshotValidator.issue(current);
+        if (!snapshotIssue.isEmpty()) {
+            return snapshotIssue + " 调试模式不会绕过未知字段或 DSL 禁写。";
+        }
+        if (!plan.initial.sourceDevice().deviceId().equals(current.sourceDevice().deviceId())) {
+            return "来源设备已变化，受控重试已禁止。";
+        }
+        TargetDevice currentTarget = findTarget(flow, plan.target.deviceId());
+        if (currentTarget == null
+                || !currentTarget.supportsNotificationReceive()
+                || !sameTargetState(plan.target, currentTarget)) {
+            return "目标能力或授权已变化，受控重试已禁止。";
+        }
+        return "";
+    }
+
+    private static boolean sameRecoveryState(
+            RuleStoreSnapshot failed, RuleStoreSnapshot current) {
+        if (failed.storeVersion() != current.storeVersion()
+                || !matchesRules(failed.rules(), current.rules())) {
+            return false;
+        }
+        RuleLkg failedState = RuleLkg.capture(failed);
+        return failedState.targetStatesMatch(current)
+                && failedState.permissionsMatch(current);
+    }
+
+    private String enterRecoveryFault(String message) {
+        try {
+            gateway.enterReadOnlyFault(message);
+            return message;
+        } catch (RuntimeException exception) {
+            return message + " 无法持久化故障态，请停止写入并检查适配器。";
         }
     }
 
@@ -847,6 +1203,206 @@ public final class SafeNotificationRuleWriter {
                 && left.summary().equals(right.summary())
                 && left.dslJson().equals(right.dslJson())
                 && left.createdAt() == right.createdAt();
+    }
+
+    static final class PreparedRuleWrite {
+        private final RuleStoreSnapshot initial;
+        private final RuleLkg lkg;
+        private final NotificationRule createdRule;
+        private final List<NotificationRule> candidate;
+        private final String expectedSerialized;
+        private final TargetDevice target;
+        private final boolean compatibilityUnverified;
+        private final String offlineWarning;
+        private final String failurePrefix;
+
+        private PreparedRuleWrite(
+                RuleStoreSnapshot initial,
+                RuleLkg lkg,
+                NotificationRule createdRule,
+                List<NotificationRule> candidate,
+                String expectedSerialized,
+                TargetDevice target,
+                boolean compatibilityUnverified,
+                String offlineWarning,
+                String failurePrefix) {
+            this.initial = Objects.requireNonNull(initial, "initial");
+            this.lkg = Objects.requireNonNull(lkg, "lkg");
+            this.createdRule = Objects.requireNonNull(createdRule, "createdRule");
+            this.candidate =
+                    Collections.unmodifiableList(
+                            new ArrayList<>(Objects.requireNonNull(candidate, "candidate")));
+            this.expectedSerialized =
+                    Objects.requireNonNull(expectedSerialized, "expectedSerialized");
+            this.target = Objects.requireNonNull(target, "target");
+            this.compatibilityUnverified = compatibilityUnverified;
+            this.offlineWarning = Objects.requireNonNull(offlineWarning, "offlineWarning");
+            this.failurePrefix = Objects.requireNonNull(failurePrefix, "failurePrefix");
+        }
+
+        boolean compatibilityUnverified() {
+            return compatibilityUnverified;
+        }
+    }
+
+    static final class RecoverableWriteAttempt {
+        private final ServiceResult<RuleCreationResult> result;
+        private final PreparedRuleWrite plan;
+        private final RuleStoreSnapshot failedSnapshot;
+        private final String failureReason;
+
+        private RecoverableWriteAttempt(
+                ServiceResult<RuleCreationResult> result,
+                PreparedRuleWrite plan,
+                RuleStoreSnapshot failedSnapshot,
+                String failureReason) {
+            this.result = Objects.requireNonNull(result, "result");
+            this.plan = plan;
+            this.failedSnapshot = failedSnapshot;
+            this.failureReason = Objects.requireNonNull(failureReason, "failureReason");
+        }
+
+        private static RecoverableWriteAttempt success(RuleCreationResult result) {
+            return new RecoverableWriteAttempt(
+                    ServiceResult.success(result), null, null, "");
+        }
+
+        private static RecoverableWriteAttempt failed(String message) {
+            return new RecoverableWriteAttempt(
+                    ServiceResult.failure(message), null, null, message);
+        }
+
+        private static RecoverableWriteAttempt recoverable(
+                PreparedRuleWrite plan,
+                RuleStoreSnapshot failedSnapshot,
+                String message) {
+            return new RecoverableWriteAttempt(
+                    ServiceResult.failure(message),
+                    Objects.requireNonNull(plan, "plan"),
+                    Objects.requireNonNull(failedSnapshot, "failedSnapshot"),
+                    message);
+        }
+
+        boolean recoverable() {
+            return plan != null;
+        }
+
+        ServiceResult<RuleCreationResult> result() {
+            return result;
+        }
+
+        PreparedRuleWrite plan() {
+            return plan;
+        }
+
+        RuleStoreSnapshot failedSnapshot() {
+            return failedSnapshot;
+        }
+
+        String failureReason() {
+            return failureReason;
+        }
+    }
+
+    static final class RecoveryInspection {
+        private final boolean canRetry;
+        private final boolean canRollback;
+        private final String message;
+
+        RecoveryInspection(boolean canRetry, boolean canRollback, String message) {
+            this.canRetry = canRetry;
+            this.canRollback = canRollback;
+            this.message = Objects.requireNonNull(message, "message");
+        }
+
+        boolean canRetry() {
+            return canRetry;
+        }
+
+        boolean canRollback() {
+            return canRollback;
+        }
+
+        String message() {
+            return message;
+        }
+    }
+
+    static final class RecoveryRetryAttempt {
+        private final boolean writeAttempted;
+        private final RuleCreationResult result;
+        private final String message;
+        private final boolean readOnlyFault;
+
+        private RecoveryRetryAttempt(
+                boolean writeAttempted,
+                RuleCreationResult result,
+                String message,
+                boolean readOnlyFault) {
+            this.writeAttempted = writeAttempted;
+            this.result = result;
+            this.message = Objects.requireNonNull(message, "message");
+            this.readOnlyFault = readOnlyFault;
+        }
+
+        static RecoveryRetryAttempt succeeded(RuleCreationResult result) {
+            return new RecoveryRetryAttempt(
+                    true, Objects.requireNonNull(result, "result"), "", false);
+        }
+
+        static RecoveryRetryAttempt notAttempted(String message) {
+            return new RecoveryRetryAttempt(false, null, message, false);
+        }
+
+        static RecoveryRetryAttempt failed(String message, boolean readOnlyFault) {
+            return new RecoveryRetryAttempt(true, null, message, readOnlyFault);
+        }
+
+        boolean writeAttempted() {
+            return writeAttempted;
+        }
+
+        boolean success() {
+            return result != null;
+        }
+
+        RuleCreationResult result() {
+            return result;
+        }
+
+        String message() {
+            return message;
+        }
+
+        boolean readOnlyFault() {
+            return readOnlyFault;
+        }
+    }
+
+    static final class RecoveryRollbackAttempt {
+        private final boolean verified;
+        private final String message;
+
+        private RecoveryRollbackAttempt(boolean verified, String message) {
+            this.verified = verified;
+            this.message = Objects.requireNonNull(message, "message");
+        }
+
+        static RecoveryRollbackAttempt success() {
+            return new RecoveryRollbackAttempt(true, "");
+        }
+
+        static RecoveryRollbackAttempt failed(String message) {
+            return new RecoveryRollbackAttempt(false, message);
+        }
+
+        boolean verified() {
+            return verified;
+        }
+
+        String message() {
+            return message;
+        }
     }
 
     @FunctionalInterface
