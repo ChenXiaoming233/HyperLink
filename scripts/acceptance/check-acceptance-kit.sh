@@ -264,8 +264,11 @@ fi
 for text in \
     'another forwardId in the current run' \
     'old run with the same forwardId' \
+    'complete marker from another run' \
     'different run with missing fields' \
     'marker without runId' \
+    'empty runId marker' \
+    'duplicate current runId tokens' \
     'expected-run marker with missing timestamp' \
     'expected-run marker with missing forwardId' \
     'expected-run marker with missing attempt' \

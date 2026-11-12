@@ -109,9 +109,34 @@ case "$different_run_ignored" in
     *) fail "forward verifier returned an unexpected different-run result" ;;
 esac
 
+complete_different_run_ignored="$(
+    run_verifier "$current_marker"$'\n''I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-old timestampEpoch=1700000101 forwardId=forward-other attempt=1' \
+        --run-id run-current \
+        --since 1700000000 \
+        --forward-id forward-current
+)" || fail "forward verifier did not ignore a complete marker from another run"
+case "$complete_different_run_ignored" in
+    *'forwardAttempts=1 attempt=1'*) ;;
+    *) fail "forward verifier returned an unexpected complete different-run result" ;;
+esac
+
 expect_verifier_failure \
     "forward verifier accepted a marker without runId" \
     "$current_marker"$'\n''I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt timestampEpoch=1700000101 forwardId=forward-current attempt=1' \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-current
+
+expect_verifier_failure \
+    "forward verifier accepted an empty runId marker" \
+    "$current_marker"$'\n''I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId= timestampEpoch=1700000101 forwardId=forward-current attempt=1' \
+    --run-id run-current \
+    --since 1700000000 \
+    --forward-id forward-current
+
+expect_verifier_failure \
+    "forward verifier accepted duplicate current runId tokens" \
+    "$current_marker"$'\n''I/HyperLinkAcceptance: HyperLinkAcceptance forward_attempt runId=run-current runId=run-current timestampEpoch=1700000101 forwardId=forward-current attempt=1' \
     --run-id run-current \
     --since 1700000000 \
     --forward-id forward-current
